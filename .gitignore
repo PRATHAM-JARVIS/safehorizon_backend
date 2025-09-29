@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
+env/
+*.env
+
+# FastAPI/Uvicorn logs
+*.log
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.db
+*.sqlite3
+
+# Models & data
+app/models/*.pkl
+app/models/*.pt
+app/models/*.joblib
+
+# Supabase
+.supabase/
+
+# Redis dump
+dump.rdb
+
+# Node (if frontend present)
+node_modules/
+
+# Test output
+htmlcov/
+.coverage
+dist/
+build/
+*.egg-info/.env

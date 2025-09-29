@@ -1,0 +1,34 @@
+fastapi
+uvicorn[standard]
+psycopg2-binary
+asyncpg
+SQLAlchemy>=2.0
+geoalchemy2
+supabase
+pydantic
+pydantic-settings
+scikit-learn
+torch
+lightgbm
+xgboost
+redis
+firebase-admin
+twilio
+# hyperledger-fabric-sdk-py is not maintained; placeholder for future integration
+httpx
+alembic
+joblib
+numpy
+pandas
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+aioredis
+# Testing
+pytest
+pytest-asyncio
+pytest-mock
+httpx
+# Production
+gunicorn
+psutil

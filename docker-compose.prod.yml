@@ -1,0 +1,81 @@
+# Production Docker Configuration
+version: '3.8'
+
+services:
+  # FastAPI Application
+  safehorizon-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://safehorizon:${DB_PASSWORD}@postgres:5432/safehorizon_prod
+      - REDIS_URL=redis://redis:6379/0
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+      - FIREBASE_CREDENTIALS_PATH=/app/firebase-credentials.json
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+    volumes:
+      - ./firebase-credentials.json:/app/firebase-credentials.json:ro
+      - ./models:/app/models
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    networks:
+      - safehorizon-network
+
+  # PostgreSQL with PostGIS
+  postgres:
+    image: postgis/postgis:15-3.3
+    environment:
+      - POSTGRES_DB=safehorizon_prod
+      - POSTGRES_USER=safehorizon
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-extensions.sql:/docker-entrypoint-initdb.d/init-extensions.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - safehorizon-network
+
+  # Redis for WebSocket and Caching
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - safehorizon-network
+
+  # NGINX Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - safehorizon-api
+    restart: unless-stopped
+    networks:
+      - safehorizon-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  safehorizon-network:
+    driver: bridge
