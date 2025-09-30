@@ -439,9 +439,134 @@ async def trigger_sos(
     }
 
 
+@router.get("/debug/role")
+async def debug_user_role(
+    current_user: AuthUser = Depends(get_current_user)
+):
+    """Debug endpoint to check user role and permissions"""
+    return {
+        "user_id": current_user.id,
+        "email": current_user.email,
+        "role": current_user.role,
+        "is_tourist": current_user.role in ["tourist", "admin"],
+        "is_authority": current_user.role in ["authority", "admin"],
+        "is_admin": current_user.role == "admin"
+    }
+
+
 @router.get("/zones/list")
 async def list_zones_for_all_users(
     current_user: AuthUser = Depends(get_current_user)
 ):
     """Get list of all safety zones (accessible to all authenticated users)"""
     return await get_all_zones()
+
+
+@router.get("/zones/nearby")
+async def get_nearby_zones_for_tourist(
+    lat: float,
+    lon: float,
+    radius: int = 5000,  # 5km default radius
+    current_user: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get zones near tourist's current location"""
+    from ..services.geofence import get_nearby_zones
+    
+    nearby_zones = await get_nearby_zones(lat, lon, radius)
+    
+    return {
+        "nearby_zones": nearby_zones,
+        "center": {"lat": lat, "lon": lon},
+        "radius_meters": radius,
+        "total": len(nearby_zones),
+        "generated_at": datetime.utcnow().isoformat()
+    }
+
+
+@router.get("/heatmap/zones/public")
+async def get_public_zone_heatmap(
+    bounds_north: Optional[float] = None,
+    bounds_south: Optional[float] = None,
+    bounds_east: Optional[float] = None,
+    bounds_west: Optional[float] = None,
+    zone_type: Optional[str] = None,
+    current_user: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get public zone heatmap data for tourist app"""
+    from ..models.database_models import RestrictedZone, ZoneType
+    from sqlalchemy import and_
+    
+    zones_query = select(RestrictedZone).where(RestrictedZone.is_active == True)
+    
+    # Filter by zone type if specified
+    if zone_type and zone_type != "all":
+        try:
+            zone_type_enum = ZoneType(zone_type.lower())
+            zones_query = zones_query.where(RestrictedZone.zone_type == zone_type_enum)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid zone type: {zone_type}. Must be 'safe', 'risky', 'restricted', or 'all'"
+            )
+    
+    # Apply bounds filter if provided
+    if all([bounds_north, bounds_south, bounds_east, bounds_west]):
+        zones_query = zones_query.where(
+            and_(
+                RestrictedZone.center_latitude <= bounds_north,
+                RestrictedZone.center_latitude >= bounds_south,
+                RestrictedZone.center_longitude <= bounds_east,
+                RestrictedZone.center_longitude >= bounds_west
+            )
+        )
+    
+    zones_result = await db.execute(zones_query)
+    zones = zones_result.scalars().all()
+    
+    zones_data = []
+    for zone in zones:
+        # Only show essential info to tourists (no internal details)
+        zone_data = {
+            "id": zone.id,
+            "name": zone.name,
+            "type": zone.zone_type.value,
+            "center": {
+                "lat": zone.center_latitude,
+                "lon": zone.center_longitude
+            },
+            "radius_meters": zone.radius_meters or 1000,
+            "description": zone.description,
+            "risk_level": zone.zone_type.value,
+            "safety_recommendation": _get_zone_safety_recommendation(zone.zone_type)
+        }
+        zones_data.append(zone_data)
+    
+    return {
+        "zones": zones_data,
+        "total": len(zones_data),
+        "filter": {
+            "zone_type": zone_type or "all",
+            "bounds": {
+                "north": bounds_north,
+                "south": bounds_south,
+                "east": bounds_east,
+                "west": bounds_west
+            } if all([bounds_north, bounds_south, bounds_east, bounds_west]) else None
+        },
+        "generated_at": datetime.utcnow().isoformat(),
+        "note": "Public zone information for tourist safety awareness"
+    }
+
+
+def _get_zone_safety_recommendation(zone_type) -> str:
+    """Get safety recommendation for zone type"""
+    from ..models.database_models import ZoneType
+    
+    recommendations = {
+        ZoneType.SAFE: "Safe area - normal precautions apply",
+        ZoneType.RISKY: "Exercise increased caution - stay alert",
+        ZoneType.RESTRICTED: "Avoid this area - high risk zone"
+    }
+    return recommendations.get(zone_type, "Exercise normal caution")

@@ -95,7 +95,7 @@ async def get_current_tourist(current_user: AuthUser = Depends(get_current_user)
     if current_user.role not in ["tourist", "admin"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Tourist role required"
+            detail=f"Access denied: Tourist role required. Current role: {current_user.role}"
         )
     
     result = await db.execute(select(Tourist).where(Tourist.id == current_user.id))
