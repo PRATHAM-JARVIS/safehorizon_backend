@@ -1,6 +1,6 @@
 from functools import lru_cache
 from pydantic_settings import BaseSettings
-from pydantic import AnyHttpUrl, Field
+from pydantic import Field
 from typing import List, Optional
 
 
@@ -12,11 +12,6 @@ class Settings(BaseSettings):
 
     database_url: str = Field(..., env="DATABASE_URL")
     sync_database_url: str = Field(..., env="SYNC_DATABASE_URL")
-
-    supabase_url: Optional[AnyHttpUrl] = Field(None, env="SUPABASE_URL")
-    supabase_anon_key: Optional[str] = Field(None, env="SUPABASE_ANON_KEY")
-    supabase_service_role_key: Optional[str] = Field(None, env="SUPABASE_SERVICE_ROLE_KEY")
-    supabase_jwt_secret: Optional[str] = Field(None, env="SUPABASE_JWT_SECRET")
 
     redis_url: str = Field("redis://redis:6379/0", env="REDIS_URL")
 
@@ -33,6 +28,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"  # Ignore extra fields in .env file
 
     @property 
     def get_allowed_origins(self) -> List[str]:

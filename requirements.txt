@@ -4,7 +4,6 @@ psycopg2-binary
 asyncpg
 SQLAlchemy>=2.0
 geoalchemy2
-supabase
 pydantic
 pydantic-settings
 scikit-learn

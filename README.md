@@ -7,7 +7,7 @@
 ```
 SafeHorizon Backend
 ├── FastAPI (Python 3.11)
-├── Supabase (Auth + Database)
+├── Local JWT Auth (Development/Testing)
 ├── PostgreSQL + PostGIS (Spatial data)
 ├── Redis (WebSocket scaling)
 ├── AI Models (Anomaly detection)
@@ -20,7 +20,7 @@ SafeHorizon Backend
 ## ✨ Features
 
 ### 🧑‍💼 Tourist Mobile App
-- **User Registration/Login** with Supabase Auth
+- **User Registration/Login** with JWT authentication
 - **Real-time GPS Tracking** with PostGIS storage
 - **AI Safety Scoring** (0-100 scale)
 - **SOS/Panic Button** with instant alerts
@@ -48,7 +48,6 @@ SafeHorizon Backend
 - Docker & Docker Compose
 - PostgreSQL with PostGIS
 - Redis
-- Supabase account
 
 ### 1. Clone Repository
 ```bash
@@ -177,12 +176,12 @@ docker-compose -f docker-compose.prod.yml up -d
 ### Environment Variables
 ```bash
 # Required for production
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_ANON_KEY=your_anon_key
-SUPABASE_SERVICE_ROLE_KEY=your_service_key
-JWT_SECRET=your_jwt_secret
 DATABASE_URL=postgresql+asyncpg://user:pass@host/db
+SYNC_DATABASE_URL=postgresql+psycopg2://user:pass@host/db
 REDIS_URL=redis://host:6379/0
+FIREBASE_CREDENTIALS_JSON_PATH=./firebase-credentials.json
+TWILIO_ACCOUNT_SID=your_account_sid
+TWILIO_AUTH_TOKEN=your_auth_token
 ```
 
 ## 🔧 Configuration
@@ -239,7 +238,7 @@ uvicorn app.main:app --reload
 ```
 
 ## Notes
-- Supabase: set SUPABASE_URL and keys in `.env` to enable real auth.
+- Authentication: Uses local JWT tokens (stored in-memory). For production, consider implementing token refresh and database-backed sessions.
 - PostGIS: use `geography(Point, 4326)` and ST_Contains for geofencing queries.
-- Models: persisted to `MODELS_DIR` via pickle (replace for prod with S3/Supabase Storage).
+- Models: persisted to `MODELS_DIR` via pickle (replace for prod with S3 or cloud storage).
 - Hyperledger: SDK placeholder; integrate when network available.

@@ -121,7 +121,6 @@ async def get_system_status(
         },
         "websockets": websocket_stats,
         "services": {
-            "supabase": "connected",
             "redis": "connected",
             "ai_models": "loaded"
         }
