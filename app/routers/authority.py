@@ -284,28 +284,67 @@ async def get_recent_alerts(
 
 
 @router.websocket("/alerts/subscribe")
-async def alerts_subscribe(
-    websocket: WebSocket,
-    token: str,
-    current_user: Authority = Depends(get_current_authority)
-):
+async def alerts_subscribe(websocket: WebSocket, token: str):
     """Subscribe to real-time alerts via WebSocket"""
     try:
-        user_data = {
-            "user_id": current_user.id,
-            "role": current_user.role
-        }
+        # Manually verify JWT token (dependency injection doesn't work well with WebSockets)
+        from ..auth.local_auth import local_auth
+        from ..database import AsyncSessionLocal
         
-        await websocket_manager.connect(websocket, "authority", user_data)
-        
-        # Keep connection alive
-        while True:
-            # Receive heartbeat or other messages
-            data = await websocket.receive_text()
+        try:
+            # Verify the token
+            payload = local_auth.verify_token(token)
+            user_id = payload.get("sub")
+            email = payload.get("email")
+            role = payload.get("role", "tourist")
             
-            # Echo heartbeat back
-            if data == "ping":
-                await websocket.send_text("pong")
+            if not user_id or not email:
+                await websocket.close(code=1008, reason="Invalid token payload")
+                return
+            
+            # Check if user has authority permissions
+            if role not in ["authority", "admin"]:
+                await websocket.close(code=1008, reason="Access denied: Authority role required")
+                return
+            
+        except ValueError as e:
+            # Invalid token
+            await websocket.close(code=1008, reason=f"Invalid token: {str(e)}")
+            return
+        except Exception as e:
+            # Other authentication errors
+            await websocket.close(code=1008, reason=f"Authentication failed: {str(e)}")
+            return
+        
+        # Verify user exists in database
+        async with AsyncSessionLocal() as db:
+            if role == "authority":
+                result = await db.execute(select(Authority).where(Authority.id == user_id))
+                user_record = result.scalar_one_or_none()
+                if not user_record:
+                    # Accept connection first, then close with proper message
+                    await websocket.accept()
+                    await websocket.close(code=1008, reason="Authority not found")
+                    return
+            # Admin users don't need to be in Authority table
+            
+            user_data = {
+                "user_id": user_id,
+                "email": email,
+                "role": role
+            }
+            
+            # Let websocket_manager handle the accept and connection management
+            await websocket_manager.connect(websocket, "authority", user_data)
+            
+            # Keep connection alive
+            while True:
+                # Receive heartbeat or other messages
+                data = await websocket.receive_text()
+                
+                # Echo heartbeat back
+                if data == "ping":
+                    await websocket.send_text("pong")
                 
     except WebSocketDisconnect:
         websocket_manager.disconnect(websocket)
