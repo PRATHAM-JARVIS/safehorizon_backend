@@ -127,6 +127,10 @@ class Location(Base):
     accuracy = Column(Float, nullable=True)
     timestamp = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # AI-driven safety score for this specific location (0-100)
+    safety_score = Column(Float, nullable=True, default=100.0)
+    safety_score_updated_at = Column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     tourist = relationship("Tourist", back_populates="locations")

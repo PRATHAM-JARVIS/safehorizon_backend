@@ -3,4 +3,29 @@
 .env.*
 !.env.example
 !.env.production
-.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Test results
+test_results.json
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (if large)
+# models_store/*.pkl
+# models_store/*.pth

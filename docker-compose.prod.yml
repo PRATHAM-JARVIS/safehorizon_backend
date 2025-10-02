@@ -3,35 +3,33 @@ version: '3.8'
 
 services:
   # FastAPI Application
-  safehorizon-api:
+  api:
+    container_name: safehorizon_api
     build:
       context: .
       dockerfile: Dockerfile.prod
     ports:
       - "8000:8000"
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://safehorizon:${DB_PASSWORD}@postgres:5432/safehorizon_prod
-      - REDIS_URL=redis://redis:6379/0
-      - FIREBASE_CREDENTIALS_PATH=/app/firebase-credentials.json
-      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
-      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+    env_file:
+      - .env.production
     volumes:
-      - ./firebase-credentials.json:/app/firebase-credentials.json:ro
-      - ./models:/app/models
+      - ./docs/firebase-admin-sdk.json:/app/docs/firebase-admin-sdk.json:ro
+      - ./models_store:/app/models_store
     depends_on:
-      - postgres
+      - db
       - redis
     restart: unless-stopped
     networks:
       - safehorizon-network
 
   # PostgreSQL with PostGIS
-  postgres:
-    image: postgis/postgis:15-3.3
+  db:
+    container_name: safehorizon_db
+    image: postgis/postgis:15-3.4
     environment:
-      - POSTGRES_DB=safehorizon_prod
-      - POSTGRES_USER=safehorizon
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=safehorizon
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=safehorizon_prod_2025
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init-extensions.sql:/docker-entrypoint-initdb.d/init-extensions.sql
@@ -43,6 +41,7 @@ services:
 
   # Redis for WebSocket and Caching
   redis:
+    container_name: safehorizon_redis
     image: redis:7-alpine
     command: redis-server --appendonly yes
     volumes:
@@ -53,20 +52,21 @@ services:
     networks:
       - safehorizon-network
 
-  # NGINX Reverse Proxy
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.prod.conf:/etc/nginx/nginx.conf:ro
-      - ./ssl:/etc/nginx/ssl:ro
-    depends_on:
-      - safehorizon-api
-    restart: unless-stopped
-    networks:
-      - safehorizon-network
+  # NGINX Reverse Proxy (Optional - uncomment for SSL/production)
+  # nginx:
+  #   container_name: safehorizon_nginx
+  #   image: nginx:alpine
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.prod.conf:/etc/nginx/nginx.conf:ro
+  #     - ./ssl:/etc/nginx/ssl:ro
+  #   depends_on:
+  #     - api
+  #   restart: unless-stopped
+  #   networks:
+  #     - safehorizon-network
 
 volumes:
   postgres_data:

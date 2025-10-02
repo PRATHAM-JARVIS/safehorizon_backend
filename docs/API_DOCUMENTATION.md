@@ -664,8 +664,10 @@ Allowed origins:
 
 ### Tourist Monitoring
 
-#### Get Active Tourists
+#### Get All Tourists
 **GET** `/tourists/active`
+
+Returns a list of **all registered tourists** with their current status. Despite the name "active", this endpoint now shows all tourists (both online and offline) to provide a complete view.
 
 **Response (200):**
 ```json
@@ -676,10 +678,27 @@ Allowed origins:
     "email": "tourist@example.com",
     "safety_score": 85,
     "last_location": {"lat": 28.6139, "lon": 77.2090},
-    "last_seen": "2025-10-02T10:30:00.000Z"
+    "last_seen": "2025-10-02T10:30:00.000Z",
+    "is_active": true,
+    "status": "online"
+  },
+  {
+    "id": "tourist456",
+    "name": "Jane Smith",
+    "email": "jane@example.com",
+    "safety_score": 92,
+    "last_location": {"lat": 28.6200, "lon": 77.2150},
+    "last_seen": "2025-10-01T18:45:00.000Z",
+    "is_active": false,
+    "status": "offline"
   }
 ]
 ```
+
+**Response Fields:**
+- `is_active`: Boolean indicating if tourist was active in last 24 hours
+- `status`: "online" (active in last 24h) or "offline" (inactive > 24h)
+- List is ordered by `last_seen` (most recent first)
 
 ---
 
@@ -1942,6 +1961,97 @@ ws.onmessage = (event) => {
   }
 }
 ```
+
+---
+
+### Public Panic/SOS Alert List (No Authentication Required)
+
+#### Get Active Panic Alerts
+**GET** `/notify/public/panic-alerts?limit=50&hours_back=24`
+
+**⚠️ PUBLIC ENDPOINT - No authentication required**
+
+Get a list of active panic and SOS emergency alerts. This public endpoint allows emergency services, nearby tourists, and community members to be aware of active emergencies. Personal information is anonymized for privacy protection.
+
+**Query Parameters:**
+- `limit` (optional, default: 50): Maximum number of alerts to return
+- `hours_back` (optional, default: 24): How many hours back to search for alerts
+
+**Response (200):**
+```json
+{
+  "total_alerts": 5,
+  "active_count": 3,
+  "hours_back": 24,
+  "alerts": [
+    {
+      "alert_id": "alert_789",
+      "type": "sos",
+      "severity": "critical",
+      "title": "🚨 SOS Emergency Alert",
+      "description": "Emergency situation - assistance needed",
+      "location": {
+        "lat": 28.6139,
+        "lon": 77.2090,
+        "timestamp": "2025-10-03T10:30:00.000Z"
+      },
+      "timestamp": "2025-10-03T10:30:00.000Z",
+      "time_ago": "0:15:30",
+      "status": "active"
+    },
+    {
+      "alert_id": "alert_788",
+      "type": "panic",
+      "severity": "high",
+      "title": "Panic Alert",
+      "description": "Emergency situation - assistance needed",
+      "location": {
+        "lat": 28.6200,
+        "lon": 77.2150,
+        "timestamp": "2025-10-03T09:45:00.000Z"
+      },
+      "timestamp": "2025-10-03T09:45:00.000Z",
+      "time_ago": "1:00:00",
+      "status": "active"
+    },
+    {
+      "alert_id": "alert_787",
+      "type": "sos",
+      "severity": "critical",
+      "title": "🚨 SOS Emergency Alert",
+      "description": "Emergency situation - assistance needed",
+      "location": {
+        "lat": 28.6100,
+        "lon": 77.2050,
+        "timestamp": "2025-10-02T22:15:00.000Z"
+      },
+      "timestamp": "2025-10-02T22:15:00.000Z",
+      "time_ago": "12:30:00",
+      "status": "older"
+    }
+  ],
+  "timestamp": "2025-10-03T10:45:30.000Z",
+  "note": "Personal information anonymized for privacy. Contact emergency services for urgent situations."
+}
+```
+
+**Use Cases:**
+- Emergency services monitoring active distress calls
+- Nearby tourists checking for safety concerns in their area
+- Community safety apps showing real-time emergency alerts
+- Public safety dashboards
+- Research and analytics on emergency patterns
+
+**Privacy Notes:**
+- Tourist names and personal details are NOT included
+- Only generic descriptions are shown
+- Location data is included to help responders
+- Alerts older than 1 hour are marked as "older" status
+- Alerts older than 24 hours (default) are not returned
+
+**Status Values:**
+- `active`: Alert less than 1 hour old (urgent)
+- `older`: Alert between 1-24 hours old (may be resolved)
 
 ---
 

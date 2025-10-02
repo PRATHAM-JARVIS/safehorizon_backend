@@ -3,7 +3,7 @@ from pydantic import BaseModel, validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, and_
 import logging
 import traceback
 
@@ -19,6 +19,7 @@ from ..services.notifications import send_emergency_alert
 from ..services.websocket_manager import websocket_manager
 from ..services.geofence import get_all_zones
 from ..services.blockchain import generate_efir
+from ..services.location_safety import LocationSafetyScoreCalculator
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -240,7 +241,7 @@ async def update_location(
     current_user: Tourist = Depends(get_current_tourist),
     db: AsyncSession = Depends(get_db)
 ):
-    """Update user location and run AI safety analysis"""
+    """Update user location and run comprehensive AI safety analysis"""
     try:
         logger.info(f"Location update for tourist {current_user.id}: lat={location.lat}, lon={location.lon}")
         
@@ -253,7 +254,19 @@ async def update_location(
         trip_result = await db.execute(trip_query)
         current_trip = trip_result.scalar_one_or_none()
         
-        # Create location record
+        # Initialize AI safety calculator
+        safety_calculator = LocationSafetyScoreCalculator(db)
+        
+        # Calculate comprehensive AI-driven safety score for this location
+        location_safety_data = await safety_calculator.calculate_safety_score(
+            latitude=location.lat,
+            longitude=location.lon,
+            tourist_id=current_user.id,
+            speed=location.speed,
+            timestamp=location.timestamp
+        )
+        
+        # Create location record with AI safety score
         location_record = Location(
             tourist_id=current_user.id,
             trip_id=current_trip.id if current_trip else None,
@@ -262,99 +275,97 @@ async def update_location(
             altitude=location.altitude,
             speed=location.speed,
             accuracy=location.accuracy,
-            timestamp=location.timestamp
+            timestamp=location.timestamp,
+            safety_score=location_safety_data['safety_score'],
+            safety_score_updated_at=datetime.utcnow()
         )
         
         db.add(location_record)
         
-        # Get recent locations for sequence analysis
-        recent_locations_query = select(Location).where(
-            Location.tourist_id == current_user.id,
-            Location.timestamp >= datetime.utcnow() - timedelta(hours=2)
-        ).order_by(desc(Location.timestamp)).limit(20)
-        
-        recent_result = await db.execute(recent_locations_query)
-        recent_locations = recent_result.scalars().all()
-        
-        # Prepare context for safety scoring
-        location_history = [
-            {
-                "latitude": loc.latitude,
-                "longitude": loc.longitude,
-                "speed": loc.speed or 0,
-                "timestamp": loc.timestamp.isoformat()
-            }
-            for loc in recent_locations
-        ]
-        
-        current_location_data = {
-            "latitude": location.lat,
-            "longitude": location.lon,
-            "speed": location.speed or 0,
-            "timestamp": location.timestamp.isoformat()
-        }
-        
-        # Compute safety score
-        safety_context = {
-            "lat": location.lat,
-            "lon": location.lon,
-            "location_history": location_history,
-            "current_location_data": current_location_data
-        }
-        
-        safety_score = await compute_safety_score(safety_context)
-        
-        # Update tourist's safety score and location
+        # Update tourist's overall safety score (weighted average with location score)
         tourist_query = select(Tourist).where(Tourist.id == current_user.id)
         tourist_result = await db.execute(tourist_query)
         tourist = tourist_result.scalar_one_or_none()
         
         if tourist:
-            tourist.safety_score = safety_score
+            # Blend old tourist score with new location score (70% location, 30% historical)
+            if tourist.safety_score:
+                blended_score = (location_safety_data['safety_score'] * 0.7) + (tourist.safety_score * 0.3)
+            else:
+                blended_score = location_safety_data['safety_score']
+            
+            tourist.safety_score = round(blended_score, 2)
             tourist.last_location_lat = location.lat
             tourist.last_location_lon = location.lon
             tourist.last_seen = datetime.utcnow()
         
-        # Check if alert should be triggered
-        if should_trigger_alert(safety_score):
+        # Check if alert should be triggered based on new AI risk assessment
+        safety_score = location_safety_data['safety_score']
+        risk_level = location_safety_data['risk_level']
+        
+        if risk_level in ['critical', 'high'] or safety_score < 50:
+            # Determine severity based on risk level
+            if risk_level == 'critical' or safety_score < 30:
+                severity = AlertSeverity.CRITICAL
+            elif safety_score < 40:
+                severity = AlertSeverity.HIGH
+            else:
+                severity = AlertSeverity.MEDIUM
+            
+            # Create alert with AI analysis
             alert = Alert(
                 tourist_id=current_user.id,
                 location_id=location_record.id,
                 type=AlertType.ANOMALY,
-                severity=AlertSeverity.HIGH if safety_score < 40 else AlertSeverity.MEDIUM,
-                title=f"Safety Alert - Score: {safety_score}",
-                description=f"Safety score dropped to {safety_score}. Risk level: {get_risk_level(safety_score)}"
+                severity=severity,
+                title=f"AI Safety Alert - Score: {safety_score}",
+                description=f"AI Risk Assessment: {risk_level.upper()}. " + 
+                           f"Safety score: {safety_score}. " +
+                           f"Top factors: {', '.join(location_safety_data['recommendations'][:2])}"
             )
             
             db.add(alert)
             await db.commit()
             await db.refresh(alert)
             
-            # Broadcast alert to police dashboard
+            # Broadcast alert to police dashboard with AI insights
             alert_data = {
                 "type": "safety_alert",
                 "alert_id": alert.id,
                 "tourist_id": current_user.id,
+                "tourist_name": tourist.name or tourist.email,
                 "severity": alert.severity.value,
                 "safety_score": safety_score,
+                "risk_level": risk_level,
                 "location": {"lat": location.lat, "lon": location.lon},
+                "ai_factors": location_safety_data['factors'],
+                "recommendations": location_safety_data['recommendations'],
                 "timestamp": datetime.utcnow().isoformat()
             }
             
             await websocket_manager.publish_alert("authority", alert_data)
+            
+            logger.warning(f"AI Safety Alert triggered for tourist {current_user.id}: " +
+                          f"score={safety_score}, risk={risk_level}")
         else:
             await db.commit()
         
-        logger.info(f"Location updated successfully for tourist {current_user.id}, safety_score={safety_score}")
+        logger.info(f"Location updated with AI safety analysis for tourist {current_user.id}, " +
+                   f"location_score={safety_score}, risk={risk_level}")
         
         return {
             "status": "location_updated",
             "location_id": location_record.id,
-            "safety_score": safety_score,
-            "risk_level": get_risk_level(safety_score),
+            "location_safety_score": safety_score,
+            "tourist_safety_score": tourist.safety_score if tourist else None,
+            "risk_level": risk_level,
             "lat": location.lat,
             "lon": location.lon,
-            "timestamp": location.timestamp.isoformat()
+            "timestamp": location.timestamp.isoformat(),
+            "ai_analysis": {
+                "factors": location_safety_data['factors'],
+                "recommendations": location_safety_data['recommendations']
+            }
         }
         
     except Exception as e:
@@ -461,7 +472,7 @@ async def get_location_history(
     current_user: Tourist = Depends(get_current_tourist),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get user's location history"""
+    """Get user's location history with safety scores"""
     query = select(Location).where(
         Location.tourist_id == current_user.id
     ).order_by(desc(Location.timestamp)).limit(limit)
@@ -477,10 +488,252 @@ async def get_location_history(
             "speed": loc.speed,
             "altitude": loc.altitude,
             "accuracy": loc.accuracy,
-            "timestamp": loc.timestamp.isoformat()
+            "timestamp": loc.timestamp.isoformat(),
+            "safety_score": loc.safety_score,
+            "safety_score_updated_at": loc.safety_score_updated_at.isoformat() if loc.safety_score_updated_at else None
         }
         for loc in locations
     ]
+
+
+@router.get("/location/safety-trend")
+async def get_location_safety_trend(
+    hours_back: int = 24,
+    current_user: Tourist = Depends(get_current_tourist),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get safety score trend over time for user's locations"""
+    time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
+    
+    query = select(Location).where(
+        and_(
+            Location.tourist_id == current_user.id,
+            Location.timestamp >= time_threshold,
+            Location.safety_score.isnot(None)
+        )
+    ).order_by(Location.timestamp)
+    
+    result = await db.execute(query)
+    locations = result.scalars().all()
+    
+    if not locations:
+        return {
+            "hours_back": hours_back,
+            "data_points": 0,
+            "trend": [],
+            "statistics": {
+                "average_score": None,
+                "min_score": None,
+                "max_score": None,
+                "current_score": current_user.safety_score
+            }
+        }
+    
+    trend_data = [
+        {
+            "timestamp": loc.timestamp.isoformat(),
+            "safety_score": loc.safety_score,
+            "risk_level": "critical" if loc.safety_score < 40 else "high" if loc.safety_score < 60 else "medium" if loc.safety_score < 80 else "low",
+            "location": {"lat": loc.latitude, "lon": loc.longitude}
+        }
+        for loc in locations
+    ]
+    
+    scores = [loc.safety_score for loc in locations if loc.safety_score is not None]
+    
+    return {
+        "hours_back": hours_back,
+        "data_points": len(trend_data),
+        "trend": trend_data,
+        "statistics": {
+            "average_score": sum(scores) / len(scores) if scores else None,
+            "min_score": min(scores) if scores else None,
+            "max_score": max(scores) if scores else None,
+            "current_score": current_user.safety_score,
+            "score_volatility": max(scores) - min(scores) if scores else None
+        }
+    }
+
+
+@router.get("/location/safety-analysis")
+async def get_location_safety_analysis(
+    current_user: Tourist = Depends(get_current_tourist),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get detailed AI safety analysis for tourist's current location"""
+    # Get most recent location
+    query = select(Location).where(
+        Location.tourist_id == current_user.id
+    ).order_by(desc(Location.timestamp)).limit(1)
+    
+    result = await db.execute(query)
+    recent_location = result.scalar_one_or_none()
+    
+    if not recent_location:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No location data found for analysis"
+        )
+    
+    # Initialize AI calculator
+    safety_calculator = LocationSafetyScoreCalculator(db)
+    
+    # Calculate comprehensive safety analysis
+    location_safety_data = await safety_calculator.calculate_safety_score(
+        latitude=recent_location.latitude,
+        longitude=recent_location.longitude,
+        tourist_id=current_user.id,
+        timestamp=recent_location.timestamp
+    )
+    
+    return {
+        "location": {
+            "id": recent_location.id,
+            "lat": recent_location.latitude,
+            "lon": recent_location.longitude,
+            "timestamp": recent_location.timestamp.isoformat()
+        },
+        "safety_score": location_safety_data['safety_score'],
+        "risk_level": location_safety_data['risk_level'],
+        "factors": location_safety_data['factors'],
+        "recommendations": location_safety_data['recommendations'],
+        "tourist_profile": {
+            "id": current_user.id,
+            "overall_safety_score": current_user.safety_score,
+            "last_seen": current_user.last_seen.isoformat() if current_user.last_seen else None
+        }
+    }
+
+
+@router.get("/location/nearby-risks")
+async def get_nearby_risks(
+    radius_km: float = 2.0,
+    current_user: Tourist = Depends(get_current_tourist),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get nearby safety risks and alerts around tourist's current location"""
+    # Get most recent location
+    query = select(Location).where(
+        Location.tourist_id == current_user.id
+    ).order_by(desc(Location.timestamp)).limit(1)
+    
+    result = await db.execute(query)
+    recent_location = result.scalar_one_or_none()
+    
+    if not recent_location:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No location data found"
+        )
+    
+    from math import radians, cos, sin, asin, sqrt
+    
+    def haversine(lon1, lat1, lon2, lat2):
+        lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+        dlon = lon2 - lon1
+        dlat = lat2 - lat1
+        a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+        c = 2 * asin(sqrt(a))
+        km = 6371 * c
+        return km
+    
+    # Get recent alerts within radius
+    time_threshold = datetime.utcnow() - timedelta(hours=6)
+    
+    alerts_query = select(Alert).where(
+        and_(
+            Alert.timestamp >= time_threshold,
+            Alert.severity.in_([AlertSeverity.CRITICAL, AlertSeverity.HIGH, AlertSeverity.MEDIUM])
+        )
+    )
+    
+    alerts_result = await db.execute(alerts_query)
+    all_alerts = alerts_result.scalars().all()
+    
+    # Filter alerts by distance
+    nearby_alerts = []
+    for alert in all_alerts:
+        # Get alert location from associated location or tourist's last location
+        if alert.location_id:
+            loc_query = select(Location).where(Location.id == alert.location_id)
+            loc_result = await db.execute(loc_query)
+            alert_location = loc_result.scalar_one_or_none()
+            
+            if alert_location:
+                distance = haversine(
+                    recent_location.longitude, recent_location.latitude,
+                    alert_location.longitude, alert_location.latitude
+                )
+                
+                if distance <= radius_km:
+                    nearby_alerts.append({
+                        "alert_id": alert.id,
+                        "type": alert.type.value,
+                        "severity": alert.severity.value,
+                        "title": alert.title,
+                        "description": alert.description,
+                        "distance_km": round(distance, 2),
+                        "location": {
+                            "lat": alert_location.latitude,
+                            "lon": alert_location.longitude
+                        },
+                        "timestamp": alert.timestamp.isoformat()
+                    })
+    
+    # Get risky zones within radius
+    from ..models.database_models import Zone, ZoneType
+    
+    risky_zones_query = select(Zone).where(
+        Zone.type.in_([ZoneType.RESTRICTED, ZoneType.RISKY])
+    )
+    
+    risky_zones_result = await db.execute(risky_zones_query)
+    all_risky_zones = risky_zones_result.scalars().all()
+    
+    nearby_zones = []
+    for zone in all_risky_zones:
+        distance = haversine(
+            recent_location.longitude, recent_location.latitude,
+            zone.center_lon, zone.center_lat
+        )
+        
+        # Check if within radius or if tourist is inside zone
+        if distance <= radius_km or distance <= (zone.radius_meters / 1000):
+            nearby_zones.append({
+                "zone_id": zone.id,
+                "name": zone.name,
+                "type": zone.type.value,
+                "distance_km": round(distance, 2),
+                "radius_km": round(zone.radius_meters / 1000, 2),
+                "center": {
+                    "lat": zone.center_lat,
+                    "lon": zone.center_lon
+                },
+                "is_inside": distance <= (zone.radius_meters / 1000)
+            })
+    
+    # Sort by distance
+    nearby_alerts.sort(key=lambda x: x['distance_km'])
+    nearby_zones.sort(key=lambda x: x['distance_km'])
+    
+    return {
+        "current_location": {
+            "lat": recent_location.latitude,
+            "lon": recent_location.longitude,
+            "safety_score": recent_location.safety_score,
+            "timestamp": recent_location.timestamp.isoformat()
+        },
+        "search_radius_km": radius_km,
+        "nearby_alerts": nearby_alerts,
+        "nearby_risky_zones": nearby_zones,
+        "risk_summary": {
+            "total_alerts": len(nearby_alerts),
+            "critical_alerts": len([a for a in nearby_alerts if a['severity'] == 'critical']),
+            "high_alerts": len([a for a in nearby_alerts if a['severity'] == 'high']),
+            "risky_zones_nearby": len(nearby_zones),
+            "inside_risky_zone": any(z['is_inside'] for z in nearby_zones)
+        }
+    }
 
 
 @router.get("/safety/score")

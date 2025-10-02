@@ -408,3 +408,82 @@ async def update_notification_settings(
             detail=f"Failed to update settings: {str(e)}"
         )
 
+
+@router.get("/public/panic-alerts")
+async def get_public_panic_alerts(
+    limit: int = 50,
+    hours_back: int = 24,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get list of active panic/SOS alerts (PUBLIC - No authentication required).
+    
+    This endpoint is public to allow emergency services, nearby tourists,
+    and community members to be aware of active emergencies.
+    
+    Personal information is anonymized for privacy.
+    """
+    from ..models.database_models import AlertType, AlertSeverity, Location
+    
+    # Calculate time threshold
+    time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
+    
+    # Query panic and SOS alerts
+    query = select(Alert).where(
+        Alert.type.in_([AlertType.PANIC, AlertType.SOS]),
+        Alert.timestamp >= time_threshold
+    ).order_by(desc(Alert.timestamp)).limit(limit)
+    
+    result = await db.execute(query)
+    alerts = result.scalars().all()
+    
+    # Format alerts with anonymized data
+    panic_list = []
+    for alert in alerts:
+        # Get location if available
+        location_data = None
+        if alert.location_id:
+            loc_query = select(Location).where(Location.id == alert.location_id)
+            loc_result = await db.execute(loc_query)
+            location = loc_result.scalar_one_or_none()
+            
+            if location:
+                location_data = {
+                    "lat": location.latitude,
+                    "lon": location.longitude,
+                    "timestamp": location.timestamp.isoformat()
+                }
+        
+        # Get tourist's last known location if no specific location
+        if not location_data and alert.tourist_id:
+            tourist_query = select(Tourist).where(Tourist.id == alert.tourist_id)
+            tourist_result = await db.execute(tourist_query)
+            tourist = tourist_result.scalar_one_or_none()
+            
+            if tourist and tourist.last_location_lat:
+                location_data = {
+                    "lat": tourist.last_location_lat,
+                    "lon": tourist.last_location_lon,
+                    "timestamp": tourist.last_seen.isoformat() if tourist.last_seen else None
+                }
+        
+        panic_list.append({
+            "alert_id": alert.id,
+            "type": alert.type.value,
+            "severity": alert.severity.value,
+            "title": alert.title,
+            "description": "Emergency situation - assistance needed",  # Generic description for privacy
+            "location": location_data,
+            "timestamp": alert.timestamp.isoformat(),
+            "time_ago": str(datetime.utcnow() - alert.timestamp),
+            "status": "active" if (datetime.utcnow() - alert.timestamp).total_seconds() < 3600 else "older"
+        })
+    
+    return {
+        "total_alerts": len(panic_list),
+        "active_count": len([a for a in panic_list if a['status'] == 'active']),
+        "hours_back": hours_back,
+        "alerts": panic_list,
+        "timestamp": datetime.utcnow().isoformat(),
+        "note": "Personal information anonymized for privacy. Contact emergency services for urgent situations."
+    }

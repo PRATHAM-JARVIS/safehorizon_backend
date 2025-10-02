@@ -113,32 +113,40 @@ async def get_active_tourists(
     current_user: Authority = Depends(get_current_authority),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get list of active tourists"""
-    # Get tourists who have been active in the last 24 hours
-    cutoff_time = datetime.utcnow() - timedelta(hours=24)
+    """Get list of all tourists (shows all registered tourists regardless of activity status)"""
+    from datetime import timezone
     
-    query = select(Tourist).where(
-        Tourist.is_active == True,
-        Tourist.last_seen >= cutoff_time
-    ).order_by(desc(Tourist.last_seen))
+    # Get all tourists, ordered by last_seen (most recent first, nulls last)
+    query = select(Tourist).order_by(
+        Tourist.last_seen.desc().nullslast()
+    )
     
     result = await db.execute(query)
     tourists = result.scalars().all()
     
-    return [
-        {
+    # Calculate activity status for each tourist (use timezone-aware datetime)
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
+    
+    tourist_list = []
+    for tourist in tourists:
+        # Determine if tourist is currently active (seen in last 24 hours)
+        is_recently_active = bool(tourist.last_seen and tourist.last_seen >= cutoff_time)
+        
+        tourist_list.append({
             "id": tourist.id,
             "name": tourist.name or tourist.email,
             "email": tourist.email,
-            "safety_score": tourist.safety_score,
+            "safety_score": tourist.safety_score if tourist.safety_score is not None else 100.0,
             "last_location": {
                 "lat": tourist.last_location_lat,
                 "lon": tourist.last_location_lon
-            } if tourist.last_location_lat else None,
-            "last_seen": tourist.last_seen.isoformat() if tourist.last_seen else None
-        }
-        for tourist in tourists
-    ]
+            } if tourist.last_location_lat and tourist.last_location_lon else None,
+            "last_seen": tourist.last_seen.isoformat() if tourist.last_seen else None,
+            "is_active": is_recently_active,
+            "status": "online" if is_recently_active else "offline"
+        })
+    
+    return tourist_list
 
 
 @router.get("/tourist/{tourist_id}/track")
