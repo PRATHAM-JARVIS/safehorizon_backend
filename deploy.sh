@@ -141,6 +141,53 @@ install_docker_compose() {
     print_success "Docker Compose installed successfully!"
 }
 
+install_postgresql() {
+    print_header "Installing PostgreSQL + PostGIS"
+    
+    if command -v psql &> /dev/null; then
+        print_success "PostgreSQL already installed"
+        psql --version
+        return 0
+    fi
+    
+    print_info "Installing PostgreSQL 15 and PostGIS..."
+    
+    # Add PostgreSQL repository
+    apt-get install -y wget ca-certificates
+    wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+    echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | tee /etc/apt/sources.list.d/pgdg.list
+    
+    # Update and install
+    apt-get update -y
+    apt-get install -y postgresql-15 postgresql-contrib-15 postgresql-15-postgis-3
+    
+    # Start and enable PostgreSQL
+    systemctl start postgresql
+    systemctl enable postgresql
+    
+    # Set postgres user password
+    sudo -u postgres psql -c "ALTER USER postgres PASSWORD '${DB_PASSWORD}';"
+    
+    # Configure PostgreSQL for network access
+    PG_CONF="/etc/postgresql/15/main/postgresql.conf"
+    PG_HBA="/etc/postgresql/15/main/pg_hba.conf"
+    
+    # Allow network connections
+    if ! grep -q "listen_addresses = '*'" "$PG_CONF"; then
+        echo "listen_addresses = '*'" >> "$PG_CONF"
+    fi
+    
+    # Allow password authentication
+    if ! grep -q "host all all 0.0.0.0/0 md5" "$PG_HBA"; then
+        echo "host all all 0.0.0.0/0 md5" >> "$PG_HBA"
+    fi
+    
+    # Restart PostgreSQL
+    systemctl restart postgresql
+    
+    print_success "PostgreSQL installed successfully!"
+}
+
 check_prerequisites() {
     print_header "Checking Prerequisites"
     
@@ -156,6 +203,19 @@ check_prerequisites() {
         install_docker_compose
     else
         print_success "Docker Compose is installed"
+    fi
+    
+    # Check PostgreSQL (optional - for standalone installation)
+    if ! command -v psql &> /dev/null; then
+        read -p "Install PostgreSQL locally? (y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            install_postgresql
+        else
+            print_info "Skipping PostgreSQL installation (using Docker)"
+        fi
+    else
+        print_success "PostgreSQL is installed"
     fi
 }
 
@@ -249,7 +309,10 @@ start_services() {
     
     print_success "Services started in background!"
     print_info "Waiting for services to initialize..."
-    sleep 10
+    sleep 15
+    
+    # Initialize database schema
+    initialize_database
     
     check_health
 }
@@ -298,6 +361,26 @@ check_health() {
 ##############################################################################
 # Database Operations
 ##############################################################################
+
+initialize_database() {
+    print_header "Initializing Database Schema"
+    
+    # Check if init_database.sh exists
+    if [ ! -f "init_database.sh" ]; then
+        print_warning "init_database.sh not found, skipping schema initialization"
+        return 0
+    fi
+    
+    # Make script executable
+    chmod +x init_database.sh
+    
+    # Run initialization script using Docker exec
+    print_info "Running database initialization script..."
+    docker cp init_database.sh ${PROJECT_NAME}_db:/tmp/init_database.sh
+    docker exec ${PROJECT_NAME}_db bash /tmp/init_database.sh "${DB_PASSWORD}" "localhost" "5432"
+    
+    print_success "Database schema initialized!"
+}
 
 run_migrations() {
     print_header "Running Database Migrations"
