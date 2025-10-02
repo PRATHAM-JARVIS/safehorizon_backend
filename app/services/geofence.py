@@ -81,7 +81,7 @@ async def check_point(lat: float, lon: float) -> Dict[str, Any]:
 
 
 async def get_nearby_zones(lat: float, lon: float, radius_meters: int = 1000) -> List[Dict[str, Any]]:
-    """Get zones within a specified radius of a point"""
+    """Get zones within a specified radius of a point with complete coordinate information"""
     async with AsyncSessionLocal() as session:
         # Query all active zones
         query = select(RestrictedZone).where(RestrictedZone.is_active == True)
@@ -98,14 +98,41 @@ async def get_nearby_zones(lat: float, lon: float, radius_meters: int = 1000) ->
             
             # Include zones within the specified radius
             if distance <= radius_meters:
+                # Parse bounds_json to get coordinates array
+                coordinates = None
+                if zone.bounds_json:
+                    try:
+                        import json
+                        import ast
+                        # Handle both JSON string and Python string representation
+                        if zone.bounds_json.startswith('['):
+                            try:
+                                coordinates = json.loads(zone.bounds_json)
+                            except json.JSONDecodeError:
+                                # Try ast.literal_eval for Python string representation
+                                coordinates = ast.literal_eval(zone.bounds_json)
+                    except Exception:
+                        # If parsing fails, use None
+                        coordinates = None
+                
                 zone_info = {
                     "id": zone.id,
                     "name": zone.name,
                     "type": zone.zone_type.value,
                     "description": zone.description,
+                    "center": {
+                        "lat": zone.center_latitude,
+                        "lon": zone.center_longitude
+                    },
+                    "center_latitude": zone.center_latitude,
+                    "center_longitude": zone.center_longitude,
+                    "radius_meters": zone.radius_meters or 1000,
+                    "coordinates": coordinates,  # Array of [lon, lat] pairs for polygon drawing
                     "distance_meters": round(distance, 2)
                 }
                 zone_data.append(zone_info)
+        
+        return zone_data
         
         return zone_data
 
@@ -145,6 +172,10 @@ async def create_zone(
         except ValueError:
             raise ValueError(f"Invalid zone type: {zone_type}. Must be one of: safe, risky, restricted")
         
+        # Store coordinates as proper JSON string
+        import json
+        coordinates_json = json.dumps(coordinates)
+        
         zone = RestrictedZone(
             name=name,
             description=description,
@@ -152,7 +183,7 @@ async def create_zone(
             center_latitude=center_lat,
             center_longitude=center_lon,
             radius_meters=radius_meters,
-            bounds_json=str(coordinates),  # Store original coordinates as JSON string
+            bounds_json=coordinates_json,  # Store as proper JSON string
             created_by=created_by
         )
         
@@ -166,13 +197,16 @@ async def create_zone(
             "type": zone.zone_type.value,
             "description": zone.description,
             "center": {"lat": center_lat, "lon": center_lon},
+            "center_latitude": center_lat,
+            "center_longitude": center_lon,
             "radius_meters": radius_meters,
+            "coordinates": coordinates,  # Return parsed coordinates
             "created_at": zone.created_at.isoformat()
         }
 
 
 async def get_all_zones() -> List[Dict[str, Any]]:
-    """Get all active zones"""
+    """Get all active zones with complete coordinate information"""
     async with AsyncSessionLocal() as session:
         query = select(RestrictedZone).where(RestrictedZone.is_active == True)
         result = await session.execute(query)
@@ -180,12 +214,38 @@ async def get_all_zones() -> List[Dict[str, Any]]:
         
         zone_data = []
         for zone in zones:
+            # Parse bounds_json to get coordinates array
+            coordinates = None
+            if zone.bounds_json:
+                try:
+                    import json
+                    import ast
+                    # Handle both JSON string and Python string representation
+                    if zone.bounds_json.startswith('['):
+                        try:
+                            coordinates = json.loads(zone.bounds_json)
+                        except json.JSONDecodeError:
+                            # Try ast.literal_eval for Python string representation
+                            coordinates = ast.literal_eval(zone.bounds_json)
+                except Exception:
+                    # If parsing fails, use None
+                    coordinates = None
+            
             zone_info = {
                 "id": zone.id,
                 "name": zone.name,
                 "type": zone.zone_type.value,
                 "description": zone.description,
                 "is_active": zone.is_active,
+                "center": {
+                    "lat": zone.center_latitude,
+                    "lon": zone.center_longitude
+                },
+                "center_latitude": zone.center_latitude,  # For backward compatibility
+                "center_longitude": zone.center_longitude,  # For backward compatibility
+                "radius_meters": zone.radius_meters or 1000,
+                "coordinates": coordinates,  # Array of [lon, lat] pairs for polygon drawing
+                "bounds_json": zone.bounds_json,  # Raw JSON string if needed
                 "created_at": zone.created_at.isoformat()
             }
             zone_data.append(zone_info)

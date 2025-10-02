@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     models_dir: str = Field("./models_store", env="MODELS_DIR")
 
-    allowed_origins: List[str] = Field(default_factory=lambda: ["*"], env="ALLOWED_ORIGINS")
+    allowed_origins: Optional[str] = Field(None, env="ALLOWED_ORIGINS")
 
     class Config:
         env_file = ".env"
@@ -33,13 +33,29 @@ class Settings(BaseSettings):
     @property 
     def get_allowed_origins(self) -> List[str]:
         """Get CORS allowed origins, handling both single string and list"""
+        if not self.allowed_origins:
+            return ["*"]
+        
         if isinstance(self.allowed_origins, str):
-            # If it's a single string, split by comma or return as single item
-            if "," in self.allowed_origins:
-                return [origin.strip() for origin in self.allowed_origins.split(",")]
-            else:
-                return [self.allowed_origins]
-        return self.allowed_origins
+            # Handle JSON-like string from .env: '["*"]' or '*'
+            origins_str = self.allowed_origins.strip()
+            
+            # Remove brackets and quotes if present
+            if origins_str.startswith('[') and origins_str.endswith(']'):
+                origins_str = origins_str[1:-1]
+            
+            # Split by comma and clean up
+            origins = []
+            for origin in origins_str.split(','):
+                clean_origin = origin.strip().strip('"').strip("'")
+                if clean_origin:
+                    origins.append(clean_origin)
+            return origins if origins else ["*"]
+        
+        if isinstance(self.allowed_origins, list):
+            return self.allowed_origins
+            
+        return ["*"]
 
 
 @lru_cache()

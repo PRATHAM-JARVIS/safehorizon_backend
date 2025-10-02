@@ -10,8 +10,8 @@ from ..auth.local_auth_utils import (
     authenticate_user, create_user_account, get_current_authority, AuthUser
 )
 from ..models.database_models import (
-    Tourist, Location, Alert, RestrictedZone, Authority, Incident, 
-    AlertType, AlertSeverity, ZoneType
+    Tourist, Location, Alert, RestrictedZone, Authority, Incident, EFIR,
+    AlertType, AlertSeverity, ZoneType, Trip, TripStatus
 )
 from ..services.websocket_manager import websocket_manager
 from ..services.geofence import create_zone, get_all_zones, delete_zone
@@ -245,6 +245,490 @@ async def get_tourist_alerts(
     ]
 
 
+@router.get("/tourist/{tourist_id}/profile")
+async def get_tourist_profile(
+    tourist_id: str,
+    current_user: Authority = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get complete tourist profile with all details for police monitoring"""
+    # Get tourist
+    tourist_query = select(Tourist).where(Tourist.id == tourist_id)
+    tourist_result = await db.execute(tourist_query)
+    tourist = tourist_result.scalar_one_or_none()
+    
+    if not tourist:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tourist not found"
+        )
+    
+    # Get active trip
+    active_trip_query = select(Trip).where(
+        Trip.tourist_id == tourist_id,
+        Trip.status == TripStatus.ACTIVE
+    ).order_by(desc(Trip.start_date))
+    
+    active_trip_result = await db.execute(active_trip_query)
+    active_trip = active_trip_result.scalar_one_or_none()
+    
+    # Get total trips count
+    trips_count_query = select(func.count(Trip.id)).where(Trip.tourist_id == tourist_id)
+    trips_count_result = await db.execute(trips_count_query)
+    trips_count = trips_count_result.scalar()
+    
+    # Get total alerts count
+    alerts_count_query = select(func.count(Alert.id)).where(Alert.tourist_id == tourist_id)
+    alerts_count_result = await db.execute(alerts_count_query)
+    alerts_count = alerts_count_result.scalar()
+    
+    # Get unresolved alerts count
+    unresolved_alerts_query = select(func.count(Alert.id)).where(
+        Alert.tourist_id == tourist_id,
+        Alert.is_resolved == False
+    )
+    unresolved_alerts_result = await db.execute(unresolved_alerts_query)
+    unresolved_alerts_count = unresolved_alerts_result.scalar()
+    
+    return {
+        "tourist": {
+            "id": tourist.id,
+            "email": tourist.email,
+            "name": tourist.name,
+            "phone": tourist.phone,
+            "emergency_contact": tourist.emergency_contact,
+            "emergency_phone": tourist.emergency_phone,
+            "safety_score": tourist.safety_score,
+            "is_active": tourist.is_active,
+            "last_location": {
+                "lat": tourist.last_location_lat,
+                "lon": tourist.last_location_lon
+            } if tourist.last_location_lat else None,
+            "last_seen": tourist.last_seen.isoformat() if tourist.last_seen else None,
+            "created_at": tourist.created_at.isoformat(),
+            "member_since_days": (datetime.utcnow() - tourist.created_at).days if tourist.created_at else 0
+        },
+        "current_trip": {
+            "id": active_trip.id,
+            "destination": active_trip.destination,
+            "start_date": active_trip.start_date.isoformat() if active_trip.start_date else None,
+            "itinerary": active_trip.itinerary,
+            "duration_hours": (datetime.utcnow() - active_trip.start_date).total_seconds() / 3600 if active_trip.start_date else 0
+        } if active_trip else None,
+        "statistics": {
+            "total_trips": trips_count,
+            "total_alerts": alerts_count,
+            "unresolved_alerts": unresolved_alerts_count,
+            "safety_rating": "safe" if tourist.safety_score >= 70 else "caution" if tourist.safety_score >= 50 else "danger"
+        }
+    }
+
+
+@router.get("/tourist/{tourist_id}/location/current")
+async def get_tourist_current_location(
+    tourist_id: str,
+    current_user: Authority = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get tourist's most recent/current location with real-time details"""
+    # Get tourist
+    tourist_query = select(Tourist).where(Tourist.id == tourist_id)
+    tourist_result = await db.execute(tourist_query)
+    tourist = tourist_result.scalar_one_or_none()
+    
+    if not tourist:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tourist not found"
+        )
+    
+    # Get most recent location
+    location_query = select(Location).where(
+        Location.tourist_id == tourist_id
+    ).order_by(desc(Location.timestamp)).limit(1)
+    
+    location_result = await db.execute(location_query)
+    location = location_result.scalar_one_or_none()
+    
+    if not location:
+        return {
+            "tourist_id": tourist_id,
+            "tourist_name": tourist.name or tourist.email,
+            "location": None,
+            "message": "No location data available"
+        }
+    
+    # Calculate time since last update
+    time_diff = datetime.utcnow() - location.timestamp
+    minutes_ago = int(time_diff.total_seconds() / 60)
+    
+    # Check if location is in restricted zone
+    from ..services.geofence import check_point
+    zone_check = await check_point(location.latitude, location.longitude)
+    
+    return {
+        "tourist_id": tourist_id,
+        "tourist_name": tourist.name or tourist.email,
+        "safety_score": tourist.safety_score,
+        "location": {
+            "id": location.id,
+            "latitude": location.latitude,
+            "longitude": location.longitude,
+            "altitude": location.altitude,
+            "speed": location.speed,
+            "accuracy": location.accuracy,
+            "timestamp": location.timestamp.isoformat(),
+            "minutes_ago": minutes_ago,
+            "is_recent": minutes_ago < 10,
+            "status": "live" if minutes_ago < 5 else "recent" if minutes_ago < 30 else "stale"
+        },
+        "zone_status": {
+            "inside_restricted": zone_check.get("inside_restricted"),
+            "risk_level": zone_check.get("risk_level"),
+            "zones": zone_check.get("zones", [])
+        },
+        "last_seen": tourist.last_seen.isoformat() if tourist.last_seen else None
+    }
+
+
+@router.get("/tourist/{tourist_id}/location/history")
+async def get_tourist_location_history(
+    tourist_id: str,
+    hours_back: int = 24,
+    limit: int = 100,
+    include_trip_info: bool = False,
+    current_user: Authority = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get tourist's location history with comprehensive filtering options"""
+    # Verify tourist exists
+    tourist_query = select(Tourist).where(Tourist.id == tourist_id)
+    tourist_result = await db.execute(tourist_query)
+    tourist = tourist_result.scalar_one_or_none()
+    
+    if not tourist:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tourist not found"
+        )
+    
+    # Calculate time threshold
+    time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
+    
+    # Build query
+    if include_trip_info:
+        locations_query = select(Location, Trip).outerjoin(
+            Trip, Location.trip_id == Trip.id
+        ).where(
+            Location.tourist_id == tourist_id,
+            Location.timestamp >= time_threshold
+        ).order_by(desc(Location.timestamp)).limit(limit)
+        
+        locations_result = await db.execute(locations_query)
+        locations_data = locations_result.all()
+        
+        locations_list = []
+        for location, trip in locations_data:
+            loc_data = {
+                "id": location.id,
+                "latitude": location.latitude,
+                "longitude": location.longitude,
+                "altitude": location.altitude,
+                "speed": location.speed,
+                "accuracy": location.accuracy,
+                "timestamp": location.timestamp.isoformat(),
+                "trip": {
+                    "id": trip.id,
+                    "destination": trip.destination,
+                    "status": trip.status.value
+                } if trip else None
+            }
+            locations_list.append(loc_data)
+    else:
+        locations_query = select(Location).where(
+            Location.tourist_id == tourist_id,
+            Location.timestamp >= time_threshold
+        ).order_by(desc(Location.timestamp)).limit(limit)
+        
+        locations_result = await db.execute(locations_query)
+        locations = locations_result.scalars().all()
+        
+        locations_list = [
+            {
+                "id": loc.id,
+                "latitude": loc.latitude,
+                "longitude": loc.longitude,
+                "altitude": loc.altitude,
+                "speed": loc.speed,
+                "accuracy": loc.accuracy,
+                "timestamp": loc.timestamp.isoformat()
+            }
+            for loc in locations
+        ]
+    
+    # Calculate movement statistics
+    total_distance = 0
+    if len(locations_list) > 1:
+        from ..services.geofence import _haversine_distance
+        for i in range(len(locations_list) - 1):
+            lat1 = locations_list[i]["latitude"]
+            lon1 = locations_list[i]["longitude"]
+            lat2 = locations_list[i + 1]["latitude"]
+            lon2 = locations_list[i + 1]["longitude"]
+            total_distance += _haversine_distance(lat1, lon1, lat2, lon2)
+    
+    return {
+        "tourist_id": tourist_id,
+        "tourist_name": tourist.name or tourist.email,
+        "filter": {
+            "hours_back": hours_back,
+            "limit": limit,
+            "time_from": time_threshold.isoformat(),
+            "time_to": datetime.utcnow().isoformat()
+        },
+        "locations": locations_list,
+        "statistics": {
+            "total_points": len(locations_list),
+            "distance_traveled_meters": round(total_distance, 2),
+            "distance_traveled_km": round(total_distance / 1000, 2),
+            "time_span_hours": hours_back
+        }
+    }
+
+
+@router.get("/tourist/{tourist_id}/movement-analysis")
+async def get_tourist_movement_analysis(
+    tourist_id: str,
+    hours_back: int = 24,
+    current_user: Authority = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Analyze tourist's movement patterns for police assessment"""
+    # Verify tourist exists
+    tourist_query = select(Tourist).where(Tourist.id == tourist_id)
+    tourist_result = await db.execute(tourist_query)
+    tourist = tourist_result.scalar_one_or_none()
+    
+    if not tourist:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tourist not found"
+        )
+    
+    # Get locations
+    time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
+    locations_query = select(Location).where(
+        Location.tourist_id == tourist_id,
+        Location.timestamp >= time_threshold
+    ).order_by(Location.timestamp)
+    
+    locations_result = await db.execute(locations_query)
+    locations = locations_result.scalars().all()
+    
+    if len(locations) < 2:
+        return {
+            "tourist_id": tourist_id,
+            "message": "Insufficient location data for analysis",
+            "data_points": len(locations)
+        }
+    
+    # Calculate movement metrics
+    from ..services.geofence import _haversine_distance
+    
+    speeds = []
+    distances = []
+    stationary_periods = 0
+    
+    for i in range(len(locations) - 1):
+        loc1 = locations[i]
+        loc2 = locations[i + 1]
+        
+        distance = _haversine_distance(
+            loc1.latitude, loc1.longitude,
+            loc2.latitude, loc2.longitude
+        )
+        distances.append(distance)
+        
+        time_diff = (loc2.timestamp - loc1.timestamp).total_seconds()
+        if time_diff > 0:
+            speed_mps = distance / time_diff
+            speed_kmh = speed_mps * 3.6
+            speeds.append(speed_kmh)
+            
+            # Check if stationary (moved less than 50m in 5+ minutes)
+            if distance < 50 and time_diff > 300:
+                stationary_periods += 1
+    
+    avg_speed = sum(speeds) / len(speeds) if speeds else 0
+    max_speed = max(speeds) if speeds else 0
+    total_distance = sum(distances)
+    
+    # Determine movement pattern
+    if avg_speed < 5:
+        movement_type = "mostly_stationary"
+    elif avg_speed < 15:
+        movement_type = "walking"
+    elif avg_speed < 50:
+        movement_type = "vehicle_city"
+    else:
+        movement_type = "vehicle_highway"
+    
+    return {
+        "tourist_id": tourist_id,
+        "tourist_name": tourist.name or tourist.email,
+        "analysis_period": {
+            "hours": hours_back,
+            "from": time_threshold.isoformat(),
+            "to": datetime.utcnow().isoformat()
+        },
+        "movement_metrics": {
+            "total_distance_km": round(total_distance / 1000, 2),
+            "average_speed_kmh": round(avg_speed, 2),
+            "max_speed_kmh": round(max_speed, 2),
+            "movement_type": movement_type,
+            "data_points": len(locations),
+            "stationary_periods": stationary_periods
+        },
+        "behavior_assessment": {
+            "is_moving": avg_speed > 1,
+            "unusual_speed": max_speed > 120,
+            "mostly_stationary": stationary_periods > len(locations) * 0.3,
+            "activity_level": "high" if len(locations) > 50 else "moderate" if len(locations) > 20 else "low"
+        }
+    }
+
+
+@router.get("/tourist/{tourist_id}/safety-timeline")
+async def get_tourist_safety_timeline(
+    tourist_id: str,
+    hours_back: int = 24,
+    current_user: Authority = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get comprehensive safety timeline including alerts, locations, and trips"""
+    # Verify tourist exists
+    tourist_query = select(Tourist).where(Tourist.id == tourist_id)
+    tourist_result = await db.execute(tourist_query)
+    tourist = tourist_result.scalar_one_or_none()
+    
+    if not tourist:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tourist not found"
+        )
+    
+    time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
+    
+    # Get all alerts in timeframe
+    alerts_query = select(Alert).where(
+        Alert.tourist_id == tourist_id,
+        Alert.created_at >= time_threshold
+    ).order_by(Alert.created_at)
+    
+    alerts_result = await db.execute(alerts_query)
+    alerts = alerts_result.scalars().all()
+    
+    # Get trips started/ended in timeframe
+    trips_query = select(Trip).where(
+        Trip.tourist_id == tourist_id,
+        Trip.updated_at >= time_threshold
+    ).order_by(Trip.updated_at)
+    
+    trips_result = await db.execute(trips_query)
+    trips = trips_result.scalars().all()
+    
+    # Build timeline events
+    timeline = []
+    
+    for alert in alerts:
+        timeline.append({
+            "timestamp": alert.created_at.isoformat(),
+            "type": "alert",
+            "event": alert.type.value,
+            "severity": alert.severity.value,
+            "title": alert.title,
+            "description": alert.description,
+            "is_resolved": alert.is_resolved
+        })
+    
+    for trip in trips:
+        if trip.start_date and trip.start_date >= time_threshold:
+            timeline.append({
+                "timestamp": trip.start_date.isoformat(),
+                "type": "trip_start",
+                "event": "trip_started",
+                "destination": trip.destination,
+                "trip_id": trip.id
+            })
+        
+        if trip.end_date and trip.end_date >= time_threshold:
+            timeline.append({
+                "timestamp": trip.end_date.isoformat(),
+                "type": "trip_end",
+                "event": "trip_completed",
+                "destination": trip.destination,
+                "trip_id": trip.id
+            })
+    
+    # Sort timeline by timestamp
+    timeline.sort(key=lambda x: x["timestamp"])
+    
+    return {
+        "tourist_id": tourist_id,
+        "tourist_name": tourist.name or tourist.email,
+        "current_safety_score": tourist.safety_score,
+        "period": {
+            "hours": hours_back,
+            "from": time_threshold.isoformat(),
+            "to": datetime.utcnow().isoformat()
+        },
+        "timeline": timeline,
+        "summary": {
+            "total_events": len(timeline),
+            "alerts_count": len(alerts),
+            "critical_alerts": sum(1 for a in alerts if a.severity == AlertSeverity.CRITICAL),
+            "trips_count": len(trips),
+            "unresolved_alerts": sum(1 for a in alerts if not a.is_resolved)
+        }
+    }
+
+
+@router.get("/tourist/{tourist_id}/emergency-contacts")
+async def get_tourist_emergency_contacts(
+    tourist_id: str,
+    current_user: Authority = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get tourist's emergency contact information for police use"""
+    # Get tourist
+    tourist_query = select(Tourist).where(Tourist.id == tourist_id)
+    tourist_result = await db.execute(tourist_query)
+    tourist = tourist_result.scalar_one_or_none()
+    
+    if not tourist:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tourist not found"
+        )
+    
+    return {
+        "tourist": {
+            "id": tourist.id,
+            "name": tourist.name,
+            "email": tourist.email,
+            "phone": tourist.phone
+        },
+        "emergency_contacts": [
+            {
+                "name": tourist.emergency_contact,
+                "phone": tourist.emergency_phone,
+                "relationship": "emergency_contact"
+            }
+        ] if tourist.emergency_contact and tourist.emergency_phone else [],
+        "note": "This information should only be used in emergency situations"
+    }
+
+
 @router.get("/alerts/recent")
 async def get_recent_alerts(
     hours: int = 24,
@@ -448,7 +932,7 @@ async def close_incident(
     }
 
 
-@router.post("/efir/generate")
+@router.post("/authority/efir/generate")
 async def generate_efir_record(
     payload: IncidentRequest,
     current_user: Authority = Depends(get_current_authority),
@@ -473,7 +957,17 @@ async def generate_efir_record(
     
     incident, alert, tourist = result
     
-    # Prepare E-FIR data
+    # Check if E-FIR already exists for this incident
+    existing_efir = await db.execute(
+        select(EFIR).where(EFIR.incident_id == incident.id)
+    )
+    if existing_efir.scalar():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="E-FIR already exists for this incident"
+        )
+    
+    # Prepare E-FIR data for blockchain
     efir_data = {
         "incident_number": incident.incident_number,
         "alert_type": alert.type.value,
@@ -492,16 +986,188 @@ async def generate_efir_record(
     
     # Generate E-FIR on blockchain
     blockchain_result = await generate_efir(efir_data)
+    tx_id = blockchain_result.get("tx_id")
+    block_hash = blockchain_result.get("block_hash")
     
-    # Update incident with blockchain reference
-    incident.efir_reference = blockchain_result.get("tx_id")
+    # Generate E-FIR number
+    now = datetime.utcnow()
+    efir_count = await db.execute(
+        select(func.count(EFIR.id)).where(
+            func.date(EFIR.generated_at) == now.date()
+        )
+    )
+    daily_count = efir_count.scalar() or 0
+    efir_number = f"EFIR-{now.strftime('%Y%m%d')}-{daily_count + 1:05d}"
+    
+    # Create E-FIR record in database
+    new_efir = EFIR(
+        efir_number=efir_number,
+        incident_id=incident.id,
+        alert_id=alert.id,
+        tourist_id=tourist.id,
+        blockchain_tx_id=tx_id,
+        block_hash=block_hash,
+        chain_id="safehorizon-efir-chain",
+        incident_type=alert.type.value,
+        severity=alert.severity.value,
+        description=alert.description or "No description provided",
+        location_lat=tourist.last_location_lat,
+        location_lon=tourist.last_location_lon,
+        tourist_name=tourist.name or "Unknown",
+        tourist_email=tourist.email,
+        tourist_phone=tourist.phone,
+        reported_by=current_user.id,
+        officer_name=current_user.name,
+        officer_badge=current_user.badge_number,
+        officer_department=current_user.department,
+        officer_notes=payload.notes,
+        incident_timestamp=alert.created_at,
+        is_verified=True,
+        verification_timestamp=datetime.utcnow()
+    )
+    
+    db.add(new_efir)
+    
+    # Also update incident with blockchain reference (backward compatibility)
+    incident.efir_reference = tx_id
+    
     await db.commit()
+    await db.refresh(new_efir)
     
     return {
         "status": "efir_generated",
+        "efir_number": efir_number,
+        "efir_id": new_efir.id,
         "incident_number": incident.incident_number,
-        "blockchain_tx": blockchain_result.get("tx_id"),
-        "efir_data": efir_data
+        "blockchain_tx": tx_id,
+        "block_hash": block_hash,
+        "efir_data": efir_data,
+        "generated_at": new_efir.generated_at.isoformat()
+    }
+
+
+@router.get("/authority/efir/list")
+async def list_efir_records(
+    limit: int = 100,
+    offset: int = 0,
+    report_source: Optional[str] = None,  # 'tourist' or 'authority'
+    status: Optional[str] = None,
+    is_verified: Optional[bool] = None,
+    current_user: Authority = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get list of all E-FIR records with filtering options"""
+    import json
+    
+    # Build query - join with incident only if incident_id is not null
+    query = select(EFIR).outerjoin(
+        Incident, EFIR.incident_id == Incident.id
+    )
+    
+    # Apply filters
+    if report_source:
+        query = query.where(EFIR.report_source == report_source)
+    
+    if is_verified is not None:
+        query = query.where(EFIR.is_verified == is_verified)
+    
+    if status:
+        query = query.where(Incident.status == status)
+    
+    # Add ordering and pagination
+    query = query.order_by(desc(EFIR.generated_at)).offset(offset).limit(limit)
+    
+    # Execute query
+    result = await db.execute(query)
+    efirs = result.scalars().all()
+    
+    # Get total count for pagination
+    count_query = select(func.count(EFIR.id))
+    if report_source:
+        count_query = count_query.where(EFIR.report_source == report_source)
+    if is_verified is not None:
+        count_query = count_query.where(EFIR.is_verified == is_verified)
+    if status:
+        count_query = count_query.join(Incident, EFIR.incident_id == Incident.id).where(Incident.status == status)
+    
+    total_result = await db.execute(count_query)
+    total = total_result.scalar()
+    
+    # Format response
+    efir_list = []
+    for efir in efirs:
+        # Get incident info if exists
+        incident_info = None
+        if efir.incident_id:
+            incident_query = select(Incident).where(Incident.id == efir.incident_id)
+            incident_result = await db.execute(incident_query)
+            incident = incident_result.scalar_one_or_none()
+            if incident:
+                incident_info = {
+                    "incident_number": incident.incident_number,
+                    "incident_id": incident.id,
+                    "status": incident.status,
+                    "priority": incident.priority,
+                    "assigned_to": incident.assigned_to,
+                    "response_time": incident.response_time.isoformat() if incident.response_time else None,
+                    "resolution_notes": incident.resolution_notes,
+                    "created_at": incident.created_at.isoformat(),
+                    "updated_at": incident.updated_at.isoformat() if incident.updated_at else None
+                }
+        
+        efir_data = {
+            "efir_id": efir.id,
+            "fir_number": efir.efir_number,
+            "blockchain_tx_id": efir.blockchain_tx_id,
+            "block_hash": efir.block_hash,
+            "chain_id": efir.chain_id,
+            "report_source": efir.report_source,
+            "alert_id": efir.alert_id,
+            "incident_type": efir.incident_type,
+            "severity": efir.severity,
+            "description": efir.description,
+            "tourist": {
+                "id": efir.tourist_id,
+                "name": efir.tourist_name,
+                "email": efir.tourist_email,
+                "phone": efir.tourist_phone
+            },
+            "location": {
+                "lat": efir.location_lat,
+                "lon": efir.location_lon,
+                "description": efir.location_description
+            } if efir.location_lat or efir.location_description else None,
+            "officer": {
+                "id": efir.reported_by,
+                "name": efir.officer_name,
+                "badge": efir.officer_badge,
+                "department": efir.officer_department
+            } if efir.reported_by else None,
+            "officer_notes": efir.officer_notes,
+            "witnesses": json.loads(efir.witnesses) if efir.witnesses else [],
+            "evidence": json.loads(efir.evidence) if efir.evidence else [],
+            "is_verified": efir.is_verified,
+            "verification_timestamp": efir.verification_timestamp.isoformat() if efir.verification_timestamp else None,
+            "incident_timestamp": efir.incident_timestamp.isoformat(),
+            "generated_at": efir.generated_at.isoformat(),
+            "incident": incident_info
+        }
+        efir_list.append(efir_data)
+    
+    return {
+        "success": True,
+        "efir_records": efir_list,
+        "pagination": {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + limit) < total
+        },
+        "filters": {
+            "report_source": report_source,
+            "status": status,
+            "is_verified": is_verified
+        }
     }
 
 
@@ -1119,3 +1785,295 @@ def _get_risk_level_from_score(safety_score: int) -> str:
         return "medium"
     else:
         return "low"
+
+
+# ========================================
+# Emergency Broadcast Endpoints
+# ========================================
+
+class BroadcastRadiusRequest(BaseModel):
+    center_latitude: float
+    center_longitude: float
+    radius_km: float
+    title: str
+    message: str
+    severity: str  # "low", "medium", "high", "critical"
+    alert_type: Optional[str] = None
+    action_required: Optional[str] = None
+    expires_at: Optional[datetime] = None
+
+
+class BroadcastZoneRequest(BaseModel):
+    zone_id: int
+    title: str
+    message: str
+    severity: str
+    alert_type: Optional[str] = None
+    action_required: Optional[str] = None
+
+
+class BroadcastRegionRequest(BaseModel):
+    region_bounds: Dict[str, float]  # {"min_lat": ..., "max_lat": ..., "min_lon": ..., "max_lon": ...}
+    title: str
+    message: str
+    severity: str
+    alert_type: Optional[str] = None
+    action_required: Optional[str] = None
+
+
+class BroadcastAllRequest(BaseModel):
+    title: str
+    message: str
+    severity: str
+    alert_type: Optional[str] = None
+    action_required: Optional[str] = None
+
+
+@router.post("/broadcast/radius")
+async def broadcast_radius_area(
+    req: BroadcastRadiusRequest,
+    current_user: AuthUser = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Broadcast emergency message to tourists within radius of a point"""
+    from ..services.broadcast import broadcast_radius
+    from ..models.database_models import BroadcastSeverity
+    
+    try:
+        # Convert severity string to enum
+        severity = BroadcastSeverity[req.severity.upper()]
+        
+        # Send broadcast
+        result = await broadcast_radius(
+            db=db,
+            authority_id=current_user.id,
+            center_lat=req.center_latitude,
+            center_lon=req.center_longitude,
+            radius_km=req.radius_km,
+            title=req.title,
+            message=req.message,
+            severity=severity,
+            alert_type=req.alert_type,
+            action_required=req.action_required,
+            expires_at=req.expires_at
+        )
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to broadcast: {str(e)}"
+        )
+
+
+@router.post("/broadcast/zone")
+async def broadcast_zone_area(
+    req: BroadcastZoneRequest,
+    current_user: AuthUser = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Broadcast emergency message to tourists in a specific zone"""
+    from ..services.broadcast import broadcast_zone
+    from ..models.database_models import BroadcastSeverity
+    
+    try:
+        severity = BroadcastSeverity[req.severity.upper()]
+        
+        result = await broadcast_zone(
+            db=db,
+            authority_id=current_user.id,
+            zone_id=req.zone_id,
+            title=req.title,
+            message=req.message,
+            severity=severity,
+            alert_type=req.alert_type,
+            action_required=req.action_required
+        )
+        
+        return result
+        
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(ve)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to broadcast: {str(e)}"
+        )
+
+
+@router.post("/broadcast/region")
+async def broadcast_region_area(
+    req: BroadcastRegionRequest,
+    current_user: AuthUser = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Broadcast emergency message to tourists in a geographic region"""
+    from ..services.broadcast import broadcast_region
+    from ..models.database_models import BroadcastSeverity
+    
+    try:
+        severity = BroadcastSeverity[req.severity.upper()]
+        
+        result = await broadcast_region(
+            db=db,
+            authority_id=current_user.id,
+            min_lat=req.region_bounds["min_lat"],
+            max_lat=req.region_bounds["max_lat"],
+            min_lon=req.region_bounds["min_lon"],
+            max_lon=req.region_bounds["max_lon"],
+            title=req.title,
+            message=req.message,
+            severity=severity,
+            alert_type=req.alert_type,
+            action_required=req.action_required
+        )
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to broadcast: {str(e)}"
+        )
+
+
+@router.post("/broadcast/all")
+async def broadcast_all_tourists(
+    req: BroadcastAllRequest,
+    current_user: AuthUser = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Broadcast emergency message to ALL active tourists"""
+    from ..services.broadcast import broadcast_all
+    from ..models.database_models import BroadcastSeverity
+    
+    try:
+        severity = BroadcastSeverity[req.severity.upper()]
+        
+        result = await broadcast_all(
+            db=db,
+            authority_id=current_user.id,
+            title=req.title,
+            message=req.message,
+            severity=severity,
+            alert_type=req.alert_type,
+            action_required=req.action_required
+        )
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to broadcast: {str(e)}"
+        )
+
+
+@router.get("/broadcast/history")
+async def get_broadcast_history(
+    current_user: AuthUser = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0
+):
+    """Get broadcast history for current authority"""
+    from ..models.database_models import EmergencyBroadcast
+    
+    try:
+        stmt = select(EmergencyBroadcast).where(
+            EmergencyBroadcast.sent_by == current_user.id
+        ).order_by(desc(EmergencyBroadcast.sent_at)).limit(limit).offset(offset)
+        
+        result = await db.execute(stmt)
+        broadcasts = result.scalars().all()
+        
+        return {
+            "broadcasts": [
+                {
+                    "broadcast_id": b.broadcast_id,
+                    "type": b.broadcast_type.value,
+                    "title": b.title,
+                    "severity": b.severity.value,
+                    "tourists_notified": b.tourists_notified_count,
+                    "devices_notified": b.devices_notified_count,
+                    "acknowledgments": b.acknowledgment_count,
+                    "sent_at": b.sent_at.isoformat()
+                }
+                for b in broadcasts
+            ],
+            "total": len(broadcasts)
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get broadcast history: {str(e)}"
+        )
+
+
+@router.get("/broadcast/{broadcast_id}")
+async def get_broadcast_details(
+    broadcast_id: str,
+    current_user: AuthUser = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get detailed information about a specific broadcast"""
+    from ..models.database_models import EmergencyBroadcast, BroadcastAcknowledgment
+    
+    try:
+        stmt = select(EmergencyBroadcast).where(
+            EmergencyBroadcast.broadcast_id == broadcast_id
+        )
+        result = await db.execute(stmt)
+        broadcast = result.scalar_one_or_none()
+        
+        if not broadcast:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Broadcast not found"
+            )
+        
+        # Get acknowledgments
+        ack_stmt = select(BroadcastAcknowledgment).where(
+            BroadcastAcknowledgment.broadcast_id == broadcast.id
+        )
+        ack_result = await db.execute(ack_stmt)
+        acknowledgments = ack_result.scalars().all()
+        
+        return {
+            "broadcast_id": broadcast.broadcast_id,
+            "type": broadcast.broadcast_type.value,
+            "title": broadcast.title,
+            "message": broadcast.message,
+            "severity": broadcast.severity.value,
+            "alert_type": broadcast.alert_type,
+            "action_required": broadcast.action_required,
+            "tourists_notified": broadcast.tourists_notified_count,
+            "devices_notified": broadcast.devices_notified_count,
+            "acknowledgment_count": len(acknowledgments),
+            "acknowledgment_rate": f"{(len(acknowledgments) / broadcast.tourists_notified_count * 100) if broadcast.tourists_notified_count > 0 else 0:.1f}%",
+            "sent_at": broadcast.sent_at.isoformat(),
+            "expires_at": broadcast.expires_at.isoformat() if broadcast.expires_at else None,
+            "acknowledgments": [
+                {
+                    "tourist_id": ack.tourist_id,
+                    "status": ack.status,
+                    "acknowledged_at": ack.acknowledged_at.isoformat(),
+                    "location": {"lat": ack.location_lat, "lon": ack.location_lon} if ack.location_lat else None,
+                    "notes": ack.notes
+                }
+                for ack in acknowledgments
+            ]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get broadcast details: {str(e)}"
+        )

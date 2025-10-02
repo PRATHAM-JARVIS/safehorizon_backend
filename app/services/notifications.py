@@ -110,10 +110,25 @@ class NotificationService:
             }
         
         except Exception as e:
-            logger.error(f"Failed to send push notification: {e}")
+            error_msg = str(e)
+            logger.error(f"Failed to send push notification to token {token[:20]}...: {error_msg}")
+            
+            # Provide helpful error messages
+            if "Requested entity was not found" in error_msg:
+                error_detail = "FCM token is invalid or expired. The token may not exist in Firebase."
+            elif "invalid-argument" in error_msg or "Invalid registration token" in error_msg:
+                error_detail = "FCM token format is invalid. Ensure it's a valid FCM registration token (152-163 characters)."
+            elif "registration-token-not-registered" in error_msg:
+                error_detail = "FCM token is not registered. The app may have been uninstalled or token refreshed."
+            elif "Invalid service account certificate" in error_msg:
+                error_detail = "Firebase Admin SDK credentials are incorrect. You need a service account JSON file, not google-services.json. See FIREBASE_FIX_REQUIRED.md"
+            else:
+                error_detail = error_msg
+            
             return {
                 "success": False,
-                "error": str(e)
+                "error": error_detail,
+                "raw_error": error_msg
             }
     
     async def send_push_to_multiple(
@@ -142,18 +157,34 @@ class NotificationService:
             
             response = messaging.send_multicast(message)
             
+            # Log detailed results if there are failures
+            if response.failure_count > 0:
+                logger.warning(f"Multicast notification had {response.failure_count} failures out of {len(tokens)} tokens")
+                for idx, resp in enumerate(response.responses):
+                    if not resp.success:
+                        logger.error(f"Failed to send to token {idx}: {resp.exception}")
+            
             return {
                 "success": True,
                 "success_count": response.success_count,
                 "failure_count": response.failure_count,
+                "total_tokens": len(tokens),
                 "timestamp": datetime.utcnow().isoformat()
             }
         
         except Exception as e:
-            logger.error(f"Failed to send multicast push notification: {e}")
+            error_msg = str(e)
+            logger.error(f"Failed to send multicast push notification: {error_msg}")
+            
+            if "Invalid service account certificate" in error_msg:
+                error_detail = "Firebase Admin SDK credentials are incorrect. You need a service account JSON file. See FIREBASE_FIX_REQUIRED.md"
+            else:
+                error_detail = error_msg
+            
             return {
                 "success": False,
-                "error": str(e)
+                "error": error_detail,
+                "raw_error": error_msg
             }
     
     async def send_sms(self, to_number: str, body: str) -> Dict[str, Any]:
@@ -278,3 +309,49 @@ async def send_emergency_alert(user_data: Dict[str, Any], alert_data: Dict[str, 
 async def send_push_to_multiple(tokens: List[str], title: str, body: str) -> Dict[str, Any]:
     """Send push notification to multiple devices"""
     return await notification_service.send_push_to_multiple(tokens, title, body)
+
+
+async def send_alert_to_tourist(
+    db,
+    tourist_id: str,
+    title: str,
+    body: str,
+    alert_type: str,
+    data: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Send push notification to all tourist's active devices"""
+    from sqlalchemy import select
+    from ..models.database_models import UserDevice
+    
+    # Get all active device tokens for this tourist
+    stmt = select(UserDevice).where(
+        UserDevice.user_id == tourist_id,
+        UserDevice.is_active == True
+    )
+    result = await db.execute(stmt)
+    devices = result.scalars().all()
+    
+    if not devices:
+        logger.warning(f"No active devices found for tourist {tourist_id}")
+        return {"success": False, "error": "No devices registered"}
+    
+    tokens = [device.device_token for device in devices]
+    
+    # Prepare notification data
+    notification_data = data or {}
+    notification_data.update({
+        "alert_type": alert_type,
+        "tourist_id": tourist_id,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+    
+    # Send to all devices
+    result = await notification_service.send_push_to_multiple(
+        tokens=tokens,
+        title=title,
+        body=body,
+        data=notification_data
+    )
+    
+    logger.info(f"Sent notification to {len(tokens)} devices for tourist {tourist_id}")
+    return result

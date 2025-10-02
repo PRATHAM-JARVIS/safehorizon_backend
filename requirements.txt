@@ -1,33 +1,45 @@
+# Core Framework
 fastapi
 uvicorn[standard]
+gunicorn
+
+# Database
 psycopg2-binary
 asyncpg
 SQLAlchemy>=2.0
+alembic
+
+# Geospatial
 geoalchemy2
+
+# Data Validation
 pydantic
 pydantic-settings
+python-multipart
+
+# Machine Learning
 scikit-learn
 torch
 lightgbm
 xgboost
-redis
-firebase-admin
-twilio
-# hyperledger-fabric-sdk-py is not maintained; placeholder for future integration
-httpx
-alembic
-joblib
 numpy
 pandas
+joblib
+
+# Caching
+redis
+aioredis
+
+# External Services
+firebase-admin
+twilio
+httpx
+
+# Security & Auth
 python-jose[cryptography]
 passlib[bcrypt]
-python-multipart
-aioredis
-# Testing
-pytest
-pytest-asyncio
-pytest-mock
-httpx
-# Production
-gunicorn
+
+# Utilities
+python-dotenv
 psutil
+

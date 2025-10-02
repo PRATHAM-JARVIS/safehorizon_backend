@@ -8,7 +8,9 @@ from ..services.geofence import check_point, get_nearby_zones
 from ..services.anomaly import score_point
 from ..services.sequence import score_sequence
 from ..services.scoring import compute_safety_score, get_risk_level
+from ..config import get_settings
 
+settings = get_settings()
 router = APIRouter()
 
 
@@ -182,48 +184,64 @@ async def ai_classify_alert(
     payload: Dict[str, Any],
     current_user: AuthUser = Depends(get_current_user)
 ):
-    """Classify alert severity (placeholder for future ML classifier)"""
+    """
+    Classify alert severity using rule-based system.
+    
+    Uses safety scores, alert types, and context to determine severity.
+    """
     try:
         # Extract features from payload
         safety_score = payload.get("safety_score", 50)
         alert_type = payload.get("alert_type", "unknown")
         location_data = payload.get("location_data", {})
+        context = payload.get("context", {})
         
-        # Simple rule-based classification (replace with ML model later)
-        if safety_score < 30:
-            label = "critical"
-            confidence = 0.9
-        elif safety_score < 50:
-            label = "high"
-            confidence = 0.8
-        elif safety_score < 70:
-            label = "medium"
-            confidence = 0.7
-        else:
-            label = "low"
-            confidence = 0.6
-        
-        # Boost confidence for certain alert types
+        # Rule-based severity classification
         if alert_type == "sos":
             label = "critical"
             confidence = 1.0
         elif alert_type == "panic":
             label = "high"
             confidence = 0.95
+        elif safety_score < 20:
+            label = "critical"
+            confidence = 0.9
+        elif safety_score < 40:
+            label = "high"
+            confidence = 0.85
+        elif safety_score < 60:
+            label = "medium"
+            confidence = 0.75
+        elif safety_score < 80:
+            label = "low"
+            confidence = 0.70
+        else:
+            label = "low"
+            confidence = 0.65
+        
+        # Context-based adjustments
+        if context.get("time_of_day") == "night" and label == "medium":
+            label = "high"
+            confidence = 0.80
+        
+        if context.get("tourist_history") == "new_user" and label == "high":
+            confidence = min(confidence + 0.05, 1.0)
         
         return {
-            "classification": {
-                "label": label,
-                "confidence": confidence
+            "predicted_severity": label,
+            "confidence": confidence,
+            "severity_probabilities": {
+                "low": 1.0 - confidence if label == "low" else 0.1,
+                "medium": 1.0 - confidence if label == "medium" else 0.2,
+                "high": 1.0 - confidence if label == "high" else 0.3,
+                "critical": 1.0 - confidence if label == "critical" else 0.4
             },
-            "features": {
+            "reasoning": _get_classification_reasoning(alert_type, safety_score, label),
+            "features_used": {
                 "safety_score": safety_score,
                 "alert_type": alert_type,
-                "location_available": bool(location_data)
-            },
-            "model_info": {
-                "type": "rule_based",
-                "note": "ML classifier to be implemented"
+                "has_location": bool(location_data),
+                "context": context
             },
             "timestamp": datetime.utcnow().isoformat()
         }
@@ -234,22 +252,48 @@ async def ai_classify_alert(
         )
 
 
+def _get_classification_reasoning(alert_type: str, safety_score: int, label: str) -> List[str]:
+    """Generate human-readable reasoning for classification"""
+    reasoning = []
+    
+    if alert_type in ["sos", "panic"]:
+        reasoning.append(f"{alert_type.upper()} alerts are automatically classified as {label}")
+    
+    if safety_score < 40:
+        reasoning.append(f"Low safety score ({safety_score}) indicates high risk")
+    elif safety_score >= 80:
+        reasoning.append(f"High safety score ({safety_score}) indicates low risk")
+    
+    reasoning.append(f"Classification: {label}")
+    
+    return reasoning
+
+
 @router.get("/ai/models/status")
 async def ai_models_status(
     current_user: AuthUser = Depends(get_current_user)
 ):
-    """Get status of AI models"""
+    """Get status of all AI models and services"""
+    import os
+    
+    # Check if model files exist
+    models_dir = settings.models_dir
+    isolation_forest_exists = os.path.exists(f"{models_dir}/isolation_forest.pkl")
+    lstm_exists = os.path.exists(f"{models_dir}/lstm_autoencoder.pth")
+    
     return {
         "models": {
             "isolation_forest": {
-                "status": "loaded",
+                "status": "loaded" if isolation_forest_exists else "not_trained",
                 "type": "anomaly_detection",
-                "last_trained": "placeholder"
+                "algorithm": "Isolation Forest",
+                "file_exists": isolation_forest_exists
             },
             "lstm_autoencoder": {
-                "status": "loaded",
+                "status": "loaded" if lstm_exists else "not_trained",
                 "type": "sequence_analysis",
-                "last_trained": "placeholder"
+                "architecture": "LSTM Autoencoder",
+                "file_exists": lstm_exists
             },
             "geofence": {
                 "status": "active",
