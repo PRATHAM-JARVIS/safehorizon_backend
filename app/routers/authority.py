@@ -1,7 +1,7 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func, and_
 
@@ -275,12 +275,12 @@ async def get_tourist_profile(
     # Get total trips count
     trips_count_query = select(func.count(Trip.id)).where(Trip.tourist_id == tourist_id)
     trips_count_result = await db.execute(trips_count_query)
-    trips_count = trips_count_result.scalar()
+    trips_count = trips_count_result.scalar() or 0
     
     # Get total alerts count
     alerts_count_query = select(func.count(Alert.id)).where(Alert.tourist_id == tourist_id)
     alerts_count_result = await db.execute(alerts_count_query)
-    alerts_count = alerts_count_result.scalar()
+    alerts_count = alerts_count_result.scalar() or 0
     
     # Get unresolved alerts count
     unresolved_alerts_query = select(func.count(Alert.id)).where(
@@ -288,7 +288,7 @@ async def get_tourist_profile(
         Alert.is_resolved == False
     )
     unresolved_alerts_result = await db.execute(unresolved_alerts_query)
-    unresolved_alerts_count = unresolved_alerts_result.scalar()
+    unresolved_alerts_count = unresolved_alerts_result.scalar() or 0
     
     return {
         "tourist": {
@@ -306,7 +306,7 @@ async def get_tourist_profile(
             } if tourist.last_location_lat else None,
             "last_seen": tourist.last_seen.isoformat() if tourist.last_seen else None,
             "created_at": tourist.created_at.isoformat(),
-            "member_since_days": (datetime.utcnow() - tourist.created_at).days if tourist.created_at else 0
+            "member_since_days": (datetime.utcnow() - tourist.created_at.replace(tzinfo=None)).days if tourist.created_at else 0
         },
         "current_trip": {
             "id": active_trip.id,
@@ -359,7 +359,7 @@ async def get_tourist_current_location(
         }
     
     # Calculate time since last update
-    time_diff = datetime.utcnow() - location.timestamp
+    time_diff = datetime.utcnow() - location.timestamp.replace(tzinfo=None)
     minutes_ago = int(time_diff.total_seconds() / 60)
     
     # Check if location is in restricted zone
@@ -413,7 +413,7 @@ async def get_tourist_location_history(
         )
     
     # Calculate time threshold
-    time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
+    time_threshold = datetime.now(timezone.utc) - timedelta(hours=hours_back)
     
     # Build query
     if include_trip_info:
@@ -1294,13 +1294,8 @@ async def get_heatmap_data(
     # Get recent alerts
     if include_alerts:
         heatmap_data["metadata"]["data_types"].append("alerts")
-        alerts_query = select(Alert, Tourist, Location).join(
+        alerts_query = select(Alert, Tourist).join(
             Tourist, Alert.tourist_id == Tourist.id
-        ).outerjoin(
-            Location, and_(
-                Location.tourist_id == Tourist.id,
-                Location.timestamp >= time_threshold
-            )
         ).where(
             Alert.created_at >= time_threshold
         ).order_by(desc(Alert.created_at))
@@ -1308,10 +1303,10 @@ async def get_heatmap_data(
         alerts_result = await db.execute(alerts_query)
         alerts_data = alerts_result.all()
         
-        for alert, tourist, location in alerts_data:
-            # Use alert location or tourist's last known location
-            alert_lat = location.lat if location else tourist.last_location_lat
-            alert_lon = location.lon if location else tourist.last_location_lon
+        for alert, tourist in alerts_data:
+            # Use tourist's last known location
+            alert_lat = tourist.last_location_lat
+            alert_lon = tourist.last_location_lon
             
             # Skip alerts without location data
             if not alert_lat or not alert_lon:
@@ -1325,7 +1320,7 @@ async def get_heatmap_data(
             
             alert_data = {
                 "id": alert.id,
-                "type": alert.alert_type.value,
+                "type": alert.type.value,
                 "severity": alert.severity.value,
                 "location": {
                     "lat": alert_lat,
@@ -1367,8 +1362,8 @@ async def get_heatmap_data(
             if tourist.id not in tourist_locations and location:
                 # Apply bounds filter if provided
                 if all([bounds_north, bounds_south, bounds_east, bounds_west]):
-                    if not (bounds_south <= location.lat <= bounds_north and 
-                           bounds_west <= location.lon <= bounds_east):
+                    if not (bounds_south <= location.latitude <= bounds_north and 
+                           bounds_west <= location.longitude <= bounds_east):
                         continue
                 
                 tourist_locations[tourist.id] = {
@@ -1376,8 +1371,8 @@ async def get_heatmap_data(
                     "name": tourist.name,
                     "safety_score": tourist.safety_score,
                     "location": {
-                        "lat": location.lat,
-                        "lon": location.lon,
+                        "lat": location.latitude,
+                        "lon": location.longitude,
                         "speed": location.speed,
                         "timestamp": location.timestamp.isoformat()
                     },
@@ -1495,13 +1490,8 @@ async def get_heatmap_alerts(
     
     time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
     
-    alerts_query = select(Alert, Tourist, Location).join(
+    alerts_query = select(Alert, Tourist).join(
         Tourist, Alert.tourist_id == Tourist.id
-    ).outerjoin(
-        Location, and_(
-            Location.tourist_id == Tourist.id,
-            Location.timestamp >= time_threshold
-        )
     ).where(
         Alert.created_at >= time_threshold
     )
@@ -1533,10 +1523,10 @@ async def get_heatmap_alerts(
     alerts_data = alerts_result.all()
     
     alerts_list = []
-    for alert, tourist, location in alerts_data:
-        # Use alert location or tourist's last known location
-        alert_lat = location.lat if location else tourist.last_location_lat
-        alert_lon = location.lon if location else tourist.last_location_lon
+    for alert, tourist in alerts_data:
+        # Use tourist's last known location
+        alert_lat = tourist.last_location_lat
+        alert_lon = tourist.last_location_lon
         
         # Skip alerts without location data
         if not alert_lat or not alert_lon:
@@ -1550,7 +1540,7 @@ async def get_heatmap_alerts(
         
         alert_data = {
             "id": alert.id,
-            "type": alert.alert_type.value,
+            "type": alert.type.value,
             "severity": alert.severity.value,
             "location": {
                 "lat": alert_lat,
@@ -1564,7 +1554,7 @@ async def get_heatmap_alerts(
             "title": alert.title,
             "description": alert.description,
             "is_acknowledged": alert.is_acknowledged,
-            "weight": _get_alert_weight(alert.severity, alert.alert_type),
+            "weight": _get_alert_weight(alert.severity, alert.type),
             "created_at": alert.created_at.isoformat()
         }
         alerts_list.append(alert_data)
@@ -1603,12 +1593,8 @@ async def get_heatmap_tourists(
     
     time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
     
-    tourists_query = select(Tourist, Location).outerjoin(
-        Location, and_(
-            Location.tourist_id == Tourist.id,
-            Location.timestamp >= time_threshold
-        )
-    ).where(
+    # First, get all active tourists matching criteria
+    tourists_query = select(Tourist).where(
         and_(
             Tourist.is_active == True,
             Tourist.last_seen >= time_threshold
@@ -1621,18 +1607,27 @@ async def get_heatmap_tourists(
     if max_safety_score is not None:
         tourists_query = tourists_query.where(Tourist.safety_score <= max_safety_score)
     
-    tourists_query = tourists_query.order_by(desc(Location.timestamp))
     tourists_result = await db.execute(tourists_query)
-    tourists_data = tourists_result.all()
+    tourists = tourists_result.scalars().all()
     
-    # Group by tourist to get latest location
+    # Now get latest location for each tourist
     tourist_locations = {}
-    for tourist, location in tourists_data:
-        if tourist.id not in tourist_locations and location:
+    for tourist in tourists:
+        # Get most recent location for this tourist
+        location_query = select(Location).where(
+            and_(
+                Location.tourist_id == tourist.id,
+                Location.timestamp >= time_threshold
+            )
+        ).order_by(desc(Location.timestamp)).limit(1)
+        location_result = await db.execute(location_query)
+        location = location_result.scalar_one_or_none()
+        
+        if location:
             # Apply bounds filter if provided
             if all([bounds_north, bounds_south, bounds_east, bounds_west]):
-                if not (bounds_south <= location.lat <= bounds_north and 
-                       bounds_west <= location.lon <= bounds_east):
+                if not (bounds_south <= location.latitude <= bounds_north and 
+                       bounds_west <= location.longitude <= bounds_east):
                     continue
             
             tourist_locations[tourist.id] = {
@@ -1640,8 +1635,8 @@ async def get_heatmap_tourists(
                 "name": tourist.name,
                 "safety_score": tourist.safety_score,
                 "location": {
-                    "lat": location.lat,
-                    "lon": location.lon,
+                    "lat": location.latitude,
+                    "lon": location.longitude,
                     "speed": location.speed,
                     "accuracy": location.accuracy,
                     "timestamp": location.timestamp.isoformat()
