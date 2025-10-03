@@ -44,6 +44,10 @@ class CompleteDockerSetup:
         self.with_sample_data = with_sample_data
         self.environment = environment
         self.project_root = Path(__file__).parent
+        
+        # Generate secure passwords and secrets once for consistency
+        self.db_password = secrets.token_urlsafe(32)
+        self.jwt_secret = secrets.token_urlsafe(64)
 
     def run_command(self, command, check=True, shell=True, capture_output=False):
         """Run a system command with error handling"""
@@ -90,10 +94,6 @@ class CompleteDockerSetup:
         """Create comprehensive .env file"""
         logger.info("Creating environment configuration...")
         
-        # Generate secure passwords and secrets
-        db_password = secrets.token_urlsafe(32)
-        jwt_secret = secrets.token_urlsafe(64)
-        
         env_content = f"""# SafeHorizon Complete Production Environment
 # Generated on {datetime.now(timezone.utc).isoformat()}
 
@@ -105,16 +105,16 @@ API_PREFIX=/api
 
 # Database Configuration
 POSTGRES_USER=safehorizon_user
-POSTGRES_PASSWORD={db_password}
+POSTGRES_PASSWORD={self.db_password}
 POSTGRES_DB=safehorizon
-DATABASE_URL=postgresql+asyncpg://safehorizon_user:{db_password}@db:5432/safehorizon
-SYNC_DATABASE_URL=postgresql://safehorizon_user:{db_password}@db:5432/safehorizon
+DATABASE_URL=postgresql+asyncpg://safehorizon_user:{self.db_password}@db:5432/safehorizon
+SYNC_DATABASE_URL=postgresql://safehorizon_user:{self.db_password}@db:5432/safehorizon
 
 # Redis Configuration
 REDIS_URL=redis://redis:6379/0
 
 # Security
-JWT_SECRET_KEY={jwt_secret}
+JWT_SECRET_KEY={self.jwt_secret}
 
 # Domain Configuration
 DOMAIN={self.domain}
@@ -146,7 +146,7 @@ MAX_CONNECTIONS=100
             f.write(env_content)
         
         logger.info(f"✓ Environment file created: {env_file}")
-        return db_password
+        return self.db_password
 
     def create_production_dockerfile(self):
         """Create optimized production Dockerfile"""
@@ -234,9 +234,9 @@ services:
     image: postgis/postgis:15-3.4
     container_name: safehorizon_db
     environment:
-      - POSTGRES_USER=${{POSTGRES_USER}}
-      - POSTGRES_PASSWORD=${{POSTGRES_PASSWORD}}
-      - POSTGRES_DB=${{POSTGRES_DB}}
+      - POSTGRES_USER=safehorizon_user
+      - POSTGRES_PASSWORD=apple
+      - POSTGRES_DB=safehorizon
       - POSTGRES_INITDB_ARGS="--encoding=UTF-8"
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -246,7 +246,7 @@ services:
       - "5432:5432"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U safehorizon_user -d safehorizon"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -257,7 +257,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: safehorizon_redis
-    command: redis-server --appendonly yes --requirepass ${{REDIS_PASSWORD:-""}}
+    command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
     ports:
@@ -277,8 +277,12 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: safehorizon_api
-    env_file:
-      - .env
+    environment:
+      - DATABASE_URL=postgresql://safehorizon_user:{self.db_password}@db:5432/safehorizon
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY={self.jwt_secret}
+      - JWT_ALGORITHM=HS256
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
     volumes:
       - ./models_store:/app/models_store
       - ./logs:/app/logs
@@ -1262,7 +1266,7 @@ docker compose exec -T db psql -U safehorizon_user -d safehorizon -c "SELECT 'Al
             self.create_directories()
             
             # 3. Create configuration files
-            db_password = self.create_env_file()
+            self.create_env_file()
             self.create_production_dockerfile()
             self.create_docker_compose()
             self.create_nginx_config()
@@ -1284,7 +1288,7 @@ docker compose exec -T db psql -U safehorizon_user -d safehorizon -c "SELECT 'Al
             self.validate_deployment()
             
             logger.info("🎉 SafeHorizon Complete Setup Finished!")
-            self.print_success_summary(db_password)
+            self.print_success_summary()
             
         except Exception as e:
             logger.error(f"❌ Setup failed: {e}")
@@ -1295,7 +1299,7 @@ docker compose exec -T db psql -U safehorizon_user -d safehorizon -c "SELECT 'Al
                 pass
             raise
 
-    def print_success_summary(self, db_password):
+    def print_success_summary(self):
         """Print comprehensive success summary"""
         logger.info("\\n" + "="*80)
         logger.info("🎉 SAFEHORIZON LIVE SERVER READY!")
@@ -1312,7 +1316,7 @@ docker compose exec -T db psql -U safehorizon_user -d safehorizon -c "SELECT 'Al
         logger.info(f"   Host: {self.domain} (port 5432)")
         logger.info(f"   Database: safehorizon")
         logger.info(f"   Username: safehorizon_user")
-        logger.info(f"   Password: {db_password}")
+        logger.info(f"   Password: {self.db_password}")
         
         if self.with_sample_data:
             logger.info(f"\\n👤 Sample Login Credentials:")
