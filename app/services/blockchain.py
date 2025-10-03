@@ -17,6 +17,7 @@ import logging
 from typing import Dict
 from datetime import datetime
 import uuid
+from ..utils.timezone import now_ist, ist_isoformat
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class BlockchainService:
         """Generate unique transaction ID using cryptographic hash"""
         # Create a deterministic hash from payload
         payload_string = json.dumps(payload, sort_keys=True)
-        hash_input = f"{payload_string}{datetime.utcnow().isoformat()}{uuid.uuid4()}"
+        hash_input = f"{payload_string}{ist_isoformat()}{uuid.uuid4()}"
         tx_hash = hashlib.sha256(hash_input.encode()).hexdigest()
         return f"0x{tx_hash[:64]}"
     
@@ -44,7 +45,7 @@ class BlockchainService:
         """Generate block hash for verification"""
         block_data = {
             "tx_id": tx_id,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": ist_isoformat(),
             "payload": payload,
             "chain_id": self.chain_id
         }
@@ -74,7 +75,7 @@ class BlockchainService:
                 "tx_id": tx_id,
                 "block_hash": block_hash,
                 "chain_id": self.chain_id,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": ist_isoformat(),
                 "payload": payload,
                 "status": "confirmed"
             }
@@ -120,7 +121,7 @@ class BlockchainService:
                 "tx_id": tx_id,
                 "status": "confirmed",
                 "chain_id": self.chain_id,
-                "verified_at": datetime.utcnow().isoformat()
+                "verified_at": ist_isoformat()
             }
             
         except Exception as e:

@@ -8,6 +8,7 @@ import logging
 import traceback
 
 from ..database import get_db
+from ..utils.timezone import now_ist, ist_isoformat, ensure_ist
 from ..auth.local_auth_utils import (
     authenticate_user, create_user_account, get_current_tourist, AuthUser, get_current_user
 )
@@ -57,7 +58,7 @@ class LocationUpdate(BaseModel):
     
     @validator('timestamp', pre=True, always=True)
     def set_timestamp(cls, v):
-        return v or datetime.utcnow()
+        return v or now_ist()
 
 
 class EFIRRequest(BaseModel):
@@ -73,7 +74,7 @@ class EFIRRequest(BaseModel):
     
     @validator('timestamp', pre=True, always=True)
     def set_timestamp(cls, v):
-        return v or datetime.utcnow()
+        return v or now_ist()
 
 
 @router.post("/auth/register")
@@ -164,7 +165,7 @@ async def start_trip(
     trip = Trip(
         tourist_id=current_user.id,
         destination=payload.destination,
-        start_date=datetime.utcnow(),
+        start_date=now_ist(),
         status=TripStatus.ACTIVE,
         itinerary=payload.itinerary
     )
@@ -203,7 +204,7 @@ async def end_trip(
         )
     
     trip.status = TripStatus.COMPLETED
-    trip.end_date = datetime.utcnow()
+    trip.end_date = now_ist()
     
     await db.commit()
     await db.refresh(trip)  # Refresh to ensure trip object is up to date
@@ -317,7 +318,7 @@ async def update_location(
             last_location.accuracy = location.accuracy
             last_location.timestamp = location.timestamp
             last_location.safety_score = location_safety_data['safety_score']
-            last_location.safety_score_updated_at = datetime.utcnow()
+            last_location.safety_score_updated_at = now_ist()
             
             location_record = last_location
             action = "updated"
@@ -334,7 +335,7 @@ async def update_location(
                 accuracy=location.accuracy,
                 timestamp=location.timestamp,
                 safety_score=location_safety_data['safety_score'],
-                safety_score_updated_at=datetime.utcnow()
+                safety_score_updated_at=now_ist()
             )
             
             db.add(location_record)
@@ -356,7 +357,7 @@ async def update_location(
             tourist.safety_score = round(blended_score, 2)
             tourist.last_location_lat = location.lat
             tourist.last_location_lon = location.lon
-            tourist.last_seen = datetime.utcnow()
+            tourist.last_seen = now_ist()
         
         # Check if alert should be triggered based on new AI risk assessment
         safety_score = location_safety_data['safety_score']
@@ -399,7 +400,7 @@ async def update_location(
                 "location": {"lat": location.lat, "lon": location.lon},
                 "ai_factors": location_safety_data['factors'],
                 "recommendations": location_safety_data['recommendations'],
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": ist_isoformat()
             }
             
             await websocket_manager.publish_alert("authority", alert_data)
@@ -441,7 +442,7 @@ async def update_location(
         )
     recent_locations_query = select(Location).where(
         Location.tourist_id == current_user.id,
-        Location.timestamp >= datetime.utcnow() - timedelta(hours=2)
+        Location.timestamp >= now_ist() - timedelta(hours=2)
     ).order_by(desc(Location.timestamp)).limit(20)
     
     recent_result = await db.execute(recent_locations_query)
@@ -484,7 +485,7 @@ async def update_location(
         tourist.safety_score = safety_score
         tourist.last_location_lat = location.lat
         tourist.last_location_lon = location.lon
-        tourist.last_seen = datetime.utcnow()
+        tourist.last_seen = now_ist()
     
     # Check if alert should be triggered
     if should_trigger_alert(safety_score):
@@ -564,7 +565,7 @@ async def get_location_safety_trend(
     db: AsyncSession = Depends(get_db)
 ):
     """Get safety score trend over time for user's locations"""
-    time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
+    time_threshold = now_ist() - timedelta(hours=hours_back)
     
     query = select(Location).where(
         and_(
@@ -887,7 +888,7 @@ async def trigger_sos(
             "lat": tourist.last_location_lat,
             "lon": tourist.last_location_lon
         } if tourist.last_location_lat else None,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": ist_isoformat()
     }
     
     await websocket_manager.publish_alert("authority", websocket_alert)
@@ -922,7 +923,8 @@ async def generate_efir_report(
         )
     
     # Generate a unique FIR number for tourist-reported incidents
-    fir_number = f"EFIR-{datetime.utcnow().strftime('%Y%m%d')}-T{tourist.id[:8]}-{int(datetime.utcnow().timestamp())}"
+    ist_now = now_ist()
+    fir_number = f"EFIR-{ist_now.strftime('%Y%m%d')}-T{tourist.id[:8]}-{int(ist_now.timestamp())}"
     
     # Parse location
     location_lat = None
@@ -1021,7 +1023,7 @@ async def generate_efir_report(
             "tourist_name": tourist.name or tourist.email,
             "incident_type": payload.incident_type,
             "location": location_desc or "Location not provided",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": ist_isoformat(),
             "alert_id": alert.id,
             "report_source": "tourist"
         }
@@ -1103,7 +1105,7 @@ async def get_nearby_zones_for_tourist(
         "center": {"lat": final_lat, "lon": final_lon},
         "radius_meters": final_radius,
         "total": len(nearby_zones),
-        "generated_at": datetime.utcnow().isoformat()
+        "generated_at": ist_isoformat()
     }
 
 
@@ -1178,7 +1180,7 @@ async def get_public_zone_heatmap(
                 "west": bounds_west
             } if all([bounds_north, bounds_south, bounds_east, bounds_west]) else None
         },
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": ist_isoformat(),
         "note": "Public zone information for tourist safety awareness"
     }
 
@@ -1241,7 +1243,7 @@ async def get_my_efirs(
         "success": True,
         "total": len(efirs_list),
         "efirs": efirs_list,
-        "generated_at": datetime.utcnow().isoformat()
+        "generated_at": ist_isoformat()
     }
 
 
@@ -1371,7 +1373,7 @@ async def register_device(
             existing_device.device_name = req.device_name
             existing_device.app_version = req.app_version
             existing_device.is_active = True
-            existing_device.last_used = datetime.utcnow()
+            existing_device.last_used = now_ist()
             logger.info(f"Updated device token for user {current_user.id}")
         else:
             # Create new device
@@ -1382,7 +1384,7 @@ async def register_device(
                 device_name=req.device_name,
                 app_version=req.app_version,
                 is_active=True,
-                last_used=datetime.utcnow()
+                last_used=now_ist()
             )
             db.add(device)
             logger.info(f"Registered new device for user {current_user.id}")

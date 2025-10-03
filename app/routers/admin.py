@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
 
 from ..database import get_db
+from ..utils.timezone import now_ist, ist_isoformat
 from ..auth.local_auth_utils import get_current_admin, AuthUser
 from ..models.database_models import Tourist, Authority, Location, Alert
 from ..services.anomaly import train_anomaly_model
@@ -27,7 +28,7 @@ class RetrainRequest(BaseModel):
 async def retrain_models_background(model_types: List[str], days_back: int, db: AsyncSession):
     """Background task to retrain AI models"""
     try:
-        cutoff_date = datetime.utcnow() - timedelta(days=days_back)
+        cutoff_date = now_ist() - timedelta(days=days_back)
         
         # Get location data for training
         locations_query = select(Location).where(
@@ -64,7 +65,7 @@ async def retrain_models_background(model_types: List[str], days_back: int, db: 
         await websocket_manager.publish_alert("admin", {
             "type": "retrain_complete",
             "results": results,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": ist_isoformat()
         })
         
     except Exception as e:
@@ -92,7 +93,7 @@ async def get_system_status(
     authorities_count = authorities_result.scalar()
     
     # Active users in last 24 hours
-    cutoff_time = datetime.utcnow() - timedelta(hours=24)
+    cutoff_time = now_ist() - timedelta(hours=24)
     active_tourists_query = select(func.count(Tourist.id)).where(
         Tourist.last_seen >= cutoff_time
     )
@@ -111,7 +112,7 @@ async def get_system_status(
     
     return {
         "status": "ok",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": ist_isoformat(),
         "database": {
             "status": "connected",
             "tourists_total": tourists_count,

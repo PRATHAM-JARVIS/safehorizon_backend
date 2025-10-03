@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
+from ..utils.timezone import now_ist, ensure_ist
 from ..models.database_models import Location, Alert, RestrictedZone, Tourist, AlertType, AlertSeverity
 from ..services.geofence import _haversine_distance
 
@@ -63,7 +64,7 @@ class LocationSafetyScoreCalculator:
             - recommendations: AI-generated safety recommendations
         """
         if timestamp is None:
-            timestamp = datetime.now(timezone.utc)
+            timestamp = now_ist()
         
         # Calculate all safety factors
         nearby_alerts_score = await self._calculate_nearby_alerts_score(latitude, longitude, timestamp)

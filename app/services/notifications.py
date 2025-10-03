@@ -4,6 +4,7 @@ import json
 import os
 import logging
 from datetime import datetime
+from ..utils.timezone import ist_isoformat
 
 # Firebase Admin SDK
 try:
@@ -106,7 +107,7 @@ class NotificationService:
             return {
                 "success": True,
                 "message_id": response,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": ist_isoformat()
             }
         
         except Exception as e:
@@ -169,7 +170,7 @@ class NotificationService:
                 "success_count": response.success_count,
                 "failure_count": response.failure_count,
                 "total_tokens": len(tokens),
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": ist_isoformat()
             }
         
         except Exception as e:
@@ -216,7 +217,7 @@ class NotificationService:
                 "success": True,
                 "message_sid": message.sid,
                 "status": message.status,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": ist_isoformat()
             }
         
         except Exception as e:
@@ -342,7 +343,7 @@ async def send_alert_to_tourist(
     notification_data.update({
         "alert_type": alert_type,
         "tourist_id": tourist_id,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": ist_isoformat()
     })
     
     # Send to all devices

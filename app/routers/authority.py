@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func, and_
 
 from ..database import get_db
+from ..utils.timezone import now_ist, ist_isoformat, ensure_ist
 from ..auth.local_auth_utils import (
     authenticate_user, create_user_account, get_current_authority, AuthUser
 )
@@ -168,7 +169,7 @@ async def track_tourist(
         )
     
     # Get recent locations (last 6 hours)
-    cutoff_time = datetime.utcnow() - timedelta(hours=6)
+    cutoff_time = now_ist() - timedelta(hours=6)
     locations_query = select(Location).where(
         Location.tourist_id == tourist_id,
         Location.timestamp >= cutoff_time
@@ -315,14 +316,14 @@ async def get_tourist_profile(
             } if tourist.last_location_lat else None,
             "last_seen": tourist.last_seen.isoformat() if tourist.last_seen else None,
             "created_at": tourist.created_at.isoformat(),
-            "member_since_days": (datetime.utcnow() - tourist.created_at.replace(tzinfo=None)).days if tourist.created_at else 0
+            "member_since_days": (now_ist() - tourist.created_at.replace(tzinfo=None)).days if tourist.created_at else 0
         },
         "current_trip": {
             "id": active_trip.id,
             "destination": active_trip.destination,
             "start_date": active_trip.start_date.isoformat() if active_trip.start_date else None,
             "itinerary": active_trip.itinerary,
-            "duration_hours": (datetime.utcnow() - active_trip.start_date).total_seconds() / 3600 if active_trip.start_date else 0
+            "duration_hours": (now_ist() - active_trip.start_date).total_seconds() / 3600 if active_trip.start_date else 0
         } if active_trip else None,
         "statistics": {
             "total_trips": trips_count,
@@ -368,7 +369,7 @@ async def get_tourist_current_location(
         }
     
     # Calculate time since last update
-    time_diff = datetime.utcnow() - location.timestamp.replace(tzinfo=None)
+    time_diff = now_ist() - location.timestamp.replace(tzinfo=None)
     minutes_ago = int(time_diff.total_seconds() / 60)
     
     # Check if location is in restricted zone
@@ -493,7 +494,7 @@ async def get_tourist_location_history(
             "hours_back": hours_back,
             "limit": limit,
             "time_from": time_threshold.isoformat(),
-            "time_to": datetime.utcnow().isoformat()
+            "time_to": ist_isoformat()
         },
         "locations": locations_list,
         "statistics": {
@@ -525,7 +526,7 @@ async def get_tourist_movement_analysis(
         )
     
     # Get locations
-    time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
+    time_threshold = now_ist() - timedelta(hours=hours_back)
     locations_query = select(Location).where(
         Location.tourist_id == tourist_id,
         Location.timestamp >= time_threshold
@@ -588,7 +589,7 @@ async def get_tourist_movement_analysis(
         "analysis_period": {
             "hours": hours_back,
             "from": time_threshold.isoformat(),
-            "to": datetime.utcnow().isoformat()
+            "to": ist_isoformat()
         },
         "movement_metrics": {
             "total_distance_km": round(total_distance / 1000, 2),
@@ -626,7 +627,7 @@ async def get_tourist_safety_timeline(
             detail="Tourist not found"
         )
     
-    time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
+    time_threshold = now_ist() - timedelta(hours=hours_back)
     
     # Get all alerts in timeframe
     alerts_query = select(Alert).where(
@@ -689,7 +690,7 @@ async def get_tourist_safety_timeline(
         "period": {
             "hours": hours_back,
             "from": time_threshold.isoformat(),
-            "to": datetime.utcnow().isoformat()
+            "to": ist_isoformat()
         },
         "timeline": timeline,
         "summary": {
@@ -865,7 +866,7 @@ async def acknowledge_incident(
     # Update alert acknowledgment
     alert.is_acknowledged = True
     alert.acknowledged_by = current_user.id
-    alert.acknowledged_at = datetime.utcnow()
+    alert.acknowledged_at = now_ist()
     
     # Create or update incident record
     incident_query = select(Incident).where(Incident.alert_id == payload.alert_id)
@@ -874,18 +875,19 @@ async def acknowledge_incident(
     
     if not incident:
         # Generate incident number
-        incident_number = f"INC-{datetime.utcnow().strftime('%Y%m%d')}-{payload.alert_id:06d}"
+        ist_now = now_ist()
+        incident_number = f"INC-{ist_now.strftime('%Y%m%d')}-{payload.alert_id:06d}"
         
         incident = Incident(
             alert_id=payload.alert_id,
             incident_number=incident_number,
             assigned_to=current_user.id,
-            response_time=datetime.utcnow()
+            response_time=now_ist()
         )
         db.add(incident)
     else:
         incident.assigned_to = current_user.id
-        incident.response_time = datetime.utcnow()
+        incident.response_time = now_ist()
     
     if payload.notes:
         incident.resolution_notes = payload.notes
@@ -932,14 +934,14 @@ async def close_incident(
     if alert:
         alert.is_resolved = True
         alert.resolved_by = current_user.id
-        alert.resolved_at = datetime.utcnow()
+        alert.resolved_at = now_ist()
     
     await db.commit()
     
     return {
         "status": "closed",
         "incident_number": incident.incident_number,
-        "closed_at": datetime.utcnow().isoformat()
+        "closed_at": ist_isoformat()
     }
 
 

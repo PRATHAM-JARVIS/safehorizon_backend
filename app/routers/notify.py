@@ -7,6 +7,7 @@ from sqlalchemy import select, desc, func
 import logging
 
 from ..database import get_db
+from ..utils.timezone import now_ist, ist_isoformat
 from ..auth.local_auth_utils import get_current_user, get_current_authority, AuthUser
 from ..models.database_models import Tourist, Alert, Authority
 from ..services.notifications import (
@@ -73,7 +74,7 @@ async def send_push_notification(
             return {
                 "status": "push_sent",
                 "user_id": req.user_id or current_user.id,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": ist_isoformat()
             }
         else:
             raise HTTPException(
@@ -269,7 +270,7 @@ async def get_notification_history(
     a notification that was sent to relevant parties.
     """
     try:
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+        cutoff_time = now_ist() - timedelta(hours=hours)
         
         if current_user.role == "tourist":
             # Tourist sees their own alert notifications
@@ -437,7 +438,7 @@ async def get_public_panic_alerts(
         limit = 100
     
     # Calculate time threshold
-    time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
+    time_threshold = now_ist() - timedelta(hours=hours_back)
     
     # Build optimized query with JOIN
     query = (

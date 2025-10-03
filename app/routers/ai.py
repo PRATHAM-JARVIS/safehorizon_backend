@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
+from ..utils.timezone import now_ist, ist_isoformat
 from ..auth.local_auth_utils import get_current_user, AuthUser
 from ..services.geofence import check_point, get_nearby_zones
 from ..services.anomaly import score_point
@@ -87,7 +88,7 @@ async def ai_anomaly_point(
             "latitude": payload.lat,
             "longitude": payload.lon,
             "speed": payload.speed or 0,
-            "timestamp": payload.timestamp or datetime.utcnow().isoformat()
+            "timestamp": payload.timestamp or ist_isoformat()
         }
         
         score = await score_point(location_data)
