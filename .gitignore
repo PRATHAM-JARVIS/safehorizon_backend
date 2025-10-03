@@ -11,9 +11,17 @@ __pycache__/
 *.so
 .Python
 
-# Test results
+# Test files and results
+test_*.py
+test_*.ps1
+test_*.sh
+*_test.py
+*_test.ps1
+*_test.sh
 test_results.json
 *.log
+testing/
+tests/
 
 # IDE
 .vscode/
