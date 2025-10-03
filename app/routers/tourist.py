@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, validator
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func, and_
 import logging
@@ -45,11 +45,14 @@ class TripStartRequest(BaseModel):
 
 
 class LocationUpdate(BaseModel):
-    lat: float
-    lon: float
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     speed: Optional[float] = None
     altitude: Optional[float] = None
     accuracy: Optional[float] = None
+    heading: Optional[float] = None
     timestamp: Optional[datetime] = None
     
     @validator('timestamp', pre=True, always=True)
@@ -58,8 +61,11 @@ class LocationUpdate(BaseModel):
 
 
 class EFIRRequest(BaseModel):
+    alert_id: Optional[int] = None
     incident_description: str
-    incident_type: str
+    incident_type: Optional[str] = "OTHER"
+    suspect_description: Optional[str] = None
+    witness_details: Optional[str] = None
     location: Optional[str] = None
     timestamp: Optional[datetime] = None
     witnesses: Optional[List[str]] = None
@@ -241,9 +247,24 @@ async def update_location(
     current_user: Tourist = Depends(get_current_tourist),
     db: AsyncSession = Depends(get_db)
 ):
-    """Update user location and run comprehensive AI safety analysis"""
+    """
+    Update user location and run comprehensive AI safety analysis.
+    
+    Optimization: If the new location is the same as the last location,
+    it will update the existing record instead of creating a new one.
+    """
     try:
-        logger.info(f"Location update for tourist {current_user.id}: lat={location.lat}, lon={location.lon}")
+        # Support both parameter formats
+        final_lat = location.lat if location.lat is not None else location.latitude
+        final_lon = location.lon if location.lon is not None else location.longitude
+        
+        if final_lat is None or final_lon is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Either lat/lon or latitude/longitude is required"
+            )
+        
+        logger.info(f"Location update for tourist {current_user.id}: lat={final_lat}, lon={final_lon}")
         
         # Get current active trip
         trip_query = select(Trip).where(
@@ -254,33 +275,71 @@ async def update_location(
         trip_result = await db.execute(trip_query)
         current_trip = trip_result.scalar_one_or_none()
         
+        # Check for last location to see if coordinates are the same
+        last_location_query = select(Location).where(
+            Location.tourist_id == current_user.id
+        ).order_by(desc(Location.timestamp)).limit(1)
+        
+        last_location_result = await db.execute(last_location_query)
+        last_location = last_location_result.scalar_one_or_none()
+        
+        # Define a threshold for "same location" (0.0001 degrees ≈ 11 meters)
+        location_threshold = 0.0001
+        is_same_location = False
+        
+        if last_location:
+            lat_diff = abs(last_location.latitude - final_lat)
+            lon_diff = abs(last_location.longitude - final_lon)
+            
+            if lat_diff < location_threshold and lon_diff < location_threshold:
+                is_same_location = True
+                logger.info(f"Same location detected for tourist {current_user.id}, will override existing record")
+        
         # Initialize AI safety calculator
         safety_calculator = LocationSafetyScoreCalculator(db)
         
         # Calculate comprehensive AI-driven safety score for this location
         location_safety_data = await safety_calculator.calculate_safety_score(
-            latitude=location.lat,
-            longitude=location.lon,
+            latitude=final_lat,
+            longitude=final_lon,
             tourist_id=current_user.id,
             speed=location.speed,
             timestamp=location.timestamp
         )
         
-        # Create location record with AI safety score
-        location_record = Location(
-            tourist_id=current_user.id,
-            trip_id=current_trip.id if current_trip else None,
-            latitude=location.lat,
-            longitude=location.lon,
-            altitude=location.altitude,
-            speed=location.speed,
-            accuracy=location.accuracy,
-            timestamp=location.timestamp,
-            safety_score=location_safety_data['safety_score'],
-            safety_score_updated_at=datetime.utcnow()
-        )
-        
-        db.add(location_record)
+        # Either update existing location or create new one
+        if is_same_location and last_location:
+            # Override existing location record
+            last_location.latitude = final_lat
+            last_location.longitude = final_lon
+            last_location.altitude = location.altitude
+            last_location.speed = location.speed
+            last_location.accuracy = location.accuracy
+            last_location.timestamp = location.timestamp
+            last_location.safety_score = location_safety_data['safety_score']
+            last_location.safety_score_updated_at = datetime.utcnow()
+            
+            location_record = last_location
+            action = "updated"
+            logger.info(f"Updated existing location record {location_record.id} for tourist {current_user.id}")
+        else:
+            # Create new location record with AI safety score
+            location_record = Location(
+                tourist_id=current_user.id,
+                trip_id=current_trip.id if current_trip else None,
+                latitude=final_lat,
+                longitude=final_lon,
+                altitude=location.altitude,
+                speed=location.speed,
+                accuracy=location.accuracy,
+                timestamp=location.timestamp,
+                safety_score=location_safety_data['safety_score'],
+                safety_score_updated_at=datetime.utcnow()
+            )
+            
+            db.add(location_record)
+            action = "created"
+            logger.info(f"Created new location record for tourist {current_user.id}")
         
         # Update tourist's overall safety score (weighted average with location score)
         tourist_query = select(Tourist).where(Tourist.id == current_user.id)
@@ -350,12 +409,14 @@ async def update_location(
         else:
             await db.commit()
         
-        logger.info(f"Location updated with AI safety analysis for tourist {current_user.id}, " +
+        logger.info(f"Location {action} with AI safety analysis for tourist {current_user.id}, " +
                    f"location_score={safety_score}, risk={risk_level}")
         
         return {
             "status": "location_updated",
+            "action": action,  # "created" or "updated"
             "location_id": location_record.id,
+            "is_same_location": is_same_location,
             "location_safety_score": safety_score,
             "tourist_safety_score": tourist.safety_score if tourist else None,
             "risk_level": risk_level,
@@ -612,128 +673,142 @@ async def get_nearby_risks(
     db: AsyncSession = Depends(get_db)
 ):
     """Get nearby safety risks and alerts around tourist's current location"""
-    # Get most recent location
-    query = select(Location).where(
-        Location.tourist_id == current_user.id
-    ).order_by(desc(Location.timestamp)).limit(1)
-    
-    result = await db.execute(query)
-    recent_location = result.scalar_one_or_none()
-    
-    if not recent_location:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No location data found"
-        )
-    
-    from math import radians, cos, sin, asin, sqrt
-    
-    def haversine(lon1, lat1, lon2, lat2):
-        lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
-        dlon = lon2 - lon1
-        dlat = lat2 - lat1
-        a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
-        c = 2 * asin(sqrt(a))
-        km = 6371 * c
-        return km
-    
-    # Get recent alerts within radius
-    time_threshold = datetime.utcnow() - timedelta(hours=6)
-    
-    alerts_query = select(Alert).where(
-        and_(
-            Alert.timestamp >= time_threshold,
-            Alert.severity.in_([AlertSeverity.CRITICAL, AlertSeverity.HIGH, AlertSeverity.MEDIUM])
-        )
-    )
-    
-    alerts_result = await db.execute(alerts_query)
-    all_alerts = alerts_result.scalars().all()
-    
-    # Filter alerts by distance
-    nearby_alerts = []
-    for alert in all_alerts:
-        # Get alert location from associated location or tourist's last location
-        if alert.location_id:
-            loc_query = select(Location).where(Location.id == alert.location_id)
-            loc_result = await db.execute(loc_query)
-            alert_location = loc_result.scalar_one_or_none()
-            
-            if alert_location:
-                distance = haversine(
-                    recent_location.longitude, recent_location.latitude,
-                    alert_location.longitude, alert_location.latitude
-                )
-                
-                if distance <= radius_km:
-                    nearby_alerts.append({
-                        "alert_id": alert.id,
-                        "type": alert.type.value,
-                        "severity": alert.severity.value,
-                        "title": alert.title,
-                        "description": alert.description,
-                        "distance_km": round(distance, 2),
-                        "location": {
-                            "lat": alert_location.latitude,
-                            "lon": alert_location.longitude
-                        },
-                        "timestamp": alert.timestamp.isoformat()
-                    })
-    
-    # Get risky zones within radius
-    from ..models.database_models import Zone, ZoneType
-    
-    risky_zones_query = select(Zone).where(
-        Zone.type.in_([ZoneType.RESTRICTED, ZoneType.RISKY])
-    )
-    
-    risky_zones_result = await db.execute(risky_zones_query)
-    all_risky_zones = risky_zones_result.scalars().all()
-    
-    nearby_zones = []
-    for zone in all_risky_zones:
-        distance = haversine(
-            recent_location.longitude, recent_location.latitude,
-            zone.center_lon, zone.center_lat
+    try:
+        # Get most recent location
+        query = select(Location).where(
+            Location.tourist_id == current_user.id
+        ).order_by(desc(Location.timestamp)).limit(1)
+        
+        result = await db.execute(query)
+        recent_location = result.scalar_one_or_none()
+        
+        if not recent_location:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No location data found"
+            )
+        
+        from math import radians, cos, sin, asin, sqrt
+        
+        def haversine(lon1, lat1, lon2, lat2):
+            lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+            dlon = lon2 - lon1
+            dlat = lat2 - lat1
+            a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+            c = 2 * asin(sqrt(a))
+            km = 6371 * c
+            return km
+        
+        # Get recent alerts within radius
+        now_utc = datetime.now(timezone.utc)
+        time_threshold = now_utc - timedelta(hours=6)
+        
+        alerts_query = select(Alert).where(
+            and_(
+                Alert.timestamp >= time_threshold,
+                Alert.severity.in_([AlertSeverity.CRITICAL, AlertSeverity.HIGH, AlertSeverity.MEDIUM])
+            )
         )
         
-        # Check if within radius or if tourist is inside zone
-        if distance <= radius_km or distance <= (zone.radius_meters / 1000):
-            nearby_zones.append({
-                "zone_id": zone.id,
-                "name": zone.name,
-                "type": zone.type.value,
-                "distance_km": round(distance, 2),
-                "radius_km": round(zone.radius_meters / 1000, 2),
-                "center": {
-                    "lat": zone.center_lat,
-                    "lon": zone.center_lon
-                },
-                "is_inside": distance <= (zone.radius_meters / 1000)
-            })
+        alerts_result = await db.execute(alerts_query)
+        all_alerts = alerts_result.scalars().all()
+        
+        # Filter alerts by distance
+        nearby_alerts = []
+        for alert in all_alerts:
+            try:
+                # Get alert location from associated location or tourist's last location
+                if alert.location_id:
+                    loc_query = select(Location).where(Location.id == alert.location_id)
+                    loc_result = await db.execute(loc_query)
+                    alert_location = loc_result.scalar_one_or_none()
+                    
+                    if alert_location:
+                        distance = haversine(
+                            recent_location.longitude, recent_location.latitude,
+                            alert_location.longitude, alert_location.latitude
+                        )
+                        
+                        if distance <= radius_km:
+                            nearby_alerts.append({
+                                "alert_id": alert.id,
+                                "type": alert.type.value if hasattr(alert.type, 'value') else str(alert.type),
+                                "severity": alert.severity.value if hasattr(alert.severity, 'value') else str(alert.severity),
+                                "title": alert.title,
+                                "description": alert.description or "",
+                                "distance_km": round(distance, 2),
+                                "location": {
+                                    "lat": alert_location.latitude,
+                                    "lon": alert_location.longitude
+                                },
+                                "timestamp": alert.timestamp.isoformat()
+                            })
+            except Exception as e:
+                logger.error(f"Error processing alert {alert.id}: {str(e)}")
+                continue
     
-    # Sort by distance
-    nearby_alerts.sort(key=lambda x: x['distance_km'])
-    nearby_zones.sort(key=lambda x: x['distance_km'])
-    
-    return {
-        "current_location": {
-            "lat": recent_location.latitude,
-            "lon": recent_location.longitude,
-            "safety_score": recent_location.safety_score,
-            "timestamp": recent_location.timestamp.isoformat()
-        },
-        "search_radius_km": radius_km,
-        "nearby_alerts": nearby_alerts,
-        "nearby_risky_zones": nearby_zones,
-        "risk_summary": {
-            "total_alerts": len(nearby_alerts),
-            "critical_alerts": len([a for a in nearby_alerts if a['severity'] == 'critical']),
-            "high_alerts": len([a for a in nearby_alerts if a['severity'] == 'high']),
-            "risky_zones_nearby": len(nearby_zones),
-            "inside_risky_zone": any(z['is_inside'] for z in nearby_zones)
+        # Get risky zones within radius
+        from ..models.database_models import Zone, ZoneType
+        
+        risky_zones_query = select(Zone).where(
+            Zone.type.in_([ZoneType.RESTRICTED, ZoneType.RISKY])
+        )
+        
+        risky_zones_result = await db.execute(risky_zones_query)
+        all_risky_zones = risky_zones_result.scalars().all()
+        
+        nearby_zones = []
+        for zone in all_risky_zones:
+            distance = haversine(
+                recent_location.longitude, recent_location.latitude,
+                zone.center_lon, zone.center_lat
+            )
+            
+            # Check if within radius or if tourist is inside zone
+            if distance <= radius_km or distance <= (zone.radius_meters / 1000):
+                nearby_zones.append({
+                    "zone_id": zone.id,
+                    "name": zone.name,
+                    "type": zone.type.value if hasattr(zone.type, 'value') else str(zone.type),
+                    "distance_km": round(distance, 2),
+                    "radius_km": round(zone.radius_meters / 1000, 2),
+                    "center": {
+                        "lat": zone.center_lat,
+                        "lon": zone.center_lon
+                    },
+                    "is_inside": distance <= (zone.radius_meters / 1000)
+                })
+        
+        # Sort by distance
+        nearby_alerts.sort(key=lambda x: x['distance_km'])
+        nearby_zones.sort(key=lambda x: x['distance_km'])
+        
+        return {
+            "current_location": {
+                "lat": recent_location.latitude,
+                "lon": recent_location.longitude,
+                "safety_score": recent_location.safety_score,
+                "timestamp": recent_location.timestamp.isoformat()
+            },
+            "search_radius_km": radius_km,
+            "nearby_alerts": nearby_alerts,
+            "nearby_risky_zones": nearby_zones,
+            "risk_summary": {
+                "total_alerts": len(nearby_alerts),
+                "critical_alerts": len([a for a in nearby_alerts if a['severity'] == 'critical']),
+                "high_alerts": len([a for a in nearby_alerts if a['severity'] == 'high']),
+                "risky_zones_nearby": len(nearby_zones),
+                "inside_risky_zone": any(z['is_inside'] for z in nearby_zones)
+            }
         }
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_nearby_risks: {str(e)}\n{traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get nearby risks: {str(e)}"
+        )
 
 
 @router.get("/safety/score")
@@ -998,21 +1073,35 @@ async def list_zones_for_all_users(
 
 @router.get("/zones/nearby")
 async def get_nearby_zones_for_tourist(
-    lat: float,
-    lon: float,
-    radius: int = 5000,  # 5km default radius
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    radius: Optional[int] = None,
+    radius_km: Optional[float] = None,
     current_user: AuthUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Get zones near tourist's current location"""
     from ..services.geofence import get_nearby_zones
     
-    nearby_zones = await get_nearby_zones(lat, lon, radius)
+    # Support both parameter formats
+    final_lat = lat if lat is not None else latitude
+    final_lon = lon if lon is not None else longitude
+    final_radius = radius if radius is not None else (int(radius_km * 1000) if radius_km else 5000)
+    
+    if final_lat is None or final_lon is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Either lat/lon or latitude/longitude parameters are required"
+        )
+    
+    nearby_zones = await get_nearby_zones(final_lat, final_lon, final_radius)
     
     return {
         "nearby_zones": nearby_zones,
-        "center": {"lat": lat, "lon": lon},
-        "radius_meters": radius,
+        "center": {"lat": final_lat, "lon": final_lon},
+        "radius_meters": final_radius,
         "total": len(nearby_zones),
         "generated_at": datetime.utcnow().isoformat()
     }
@@ -1322,12 +1411,18 @@ async def register_device(
 
 @router.delete("/device/unregister")
 async def unregister_device(
-    device_token: str,
     current_user: AuthUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    device_token: Optional[str] = None
 ):
     """Unregister device (on logout or app uninstall)"""
     from ..models.database_models import UserDevice
+    
+    if not device_token:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="device_token query parameter is required"
+        )
     
     try:
         stmt = select(UserDevice).where(

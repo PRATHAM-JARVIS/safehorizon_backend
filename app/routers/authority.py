@@ -238,6 +238,7 @@ async def get_tourist_alerts(
     return [
         {
             "id": alert.id,
+            "tourist_id": alert.tourist_id,
             "type": alert.type.value,
             "severity": alert.severity.value,
             "title": alert.title,
@@ -758,6 +759,7 @@ async def get_recent_alerts(
     return [
         {
             "id": alert.id,
+            "tourist_id": alert.tourist_id,
             "tourist": {
                 "id": tourist.id,
                 "name": tourist.name or tourist.email,
@@ -929,6 +931,7 @@ async def close_incident(
     
     if alert:
         alert.is_resolved = True
+        alert.resolved_by = current_user.id
         alert.resolved_at = datetime.utcnow()
     
     await db.commit()
@@ -937,6 +940,57 @@ async def close_incident(
         "status": "closed",
         "incident_number": incident.incident_number,
         "closed_at": datetime.utcnow().isoformat()
+    }
+
+
+class AlertResolveRequest(BaseModel):
+    alert_id: int
+    resolution_notes: Optional[str] = None
+
+
+@router.post("/authority/alert/resolve")
+async def resolve_alert(
+    payload: AlertResolveRequest,
+    current_user: Authority = Depends(get_current_authority),
+    db: AsyncSession = Depends(get_db)
+):
+    """Resolve an alert directly (marks alert as resolved)"""
+    # Get the alert
+    alert_query = select(Alert).where(Alert.id == payload.alert_id)
+    alert_result = await db.execute(alert_query)
+    alert = alert_result.scalar_one_or_none()
+    
+    if not alert:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Alert not found"
+        )
+    
+    # Update alert resolution
+    alert.is_resolved = True
+    alert.resolved_by = current_user.id
+    alert.resolved_at = datetime.utcnow()
+    
+    # If there's an associated incident, update it too
+    incident_query = select(Incident).where(Incident.alert_id == payload.alert_id)
+    incident_result = await db.execute(incident_query)
+    incident = incident_result.scalar_one_or_none()
+    
+    if incident:
+        incident.status = "resolved"
+        if payload.resolution_notes:
+            incident.resolution_notes = payload.resolution_notes
+    
+    await db.commit()
+    
+    return {
+        "success": True,
+        "message": "Alert resolved successfully",
+        "alert_id": payload.alert_id,
+        "tourist_id": alert.tourist_id,
+        "resolved_by": current_user.id,
+        "resolved_at": alert.resolved_at.isoformat(),
+        "incident_updated": incident is not None
     }
 
 
@@ -1328,6 +1382,7 @@ async def get_heatmap_data(
             
             alert_data = {
                 "id": alert.id,
+                "tourist_id": alert.tourist_id,
                 "type": alert.type.value,
                 "severity": alert.severity.value,
                 "location": {
@@ -1548,6 +1603,7 @@ async def get_heatmap_alerts(
         
         alert_data = {
             "id": alert.id,
+            "tourist_id": alert.tourist_id,
             "type": alert.type.value,
             "severity": alert.severity.value,
             "location": {
@@ -1826,10 +1882,12 @@ class BroadcastRegionRequest(BaseModel):
 
 class BroadcastAllRequest(BaseModel):
     title: str
-    message: str
-    severity: str
+    body: Optional[str] = None
+    message: Optional[str] = None
+    severity: Optional[str] = "INFO"
     alert_type: Optional[str] = None
     action_required: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
 
 
 @router.post("/broadcast/radius")
@@ -1955,13 +2013,25 @@ async def broadcast_all_tourists(
     from ..models.database_models import BroadcastSeverity
     
     try:
-        severity = BroadcastSeverity[req.severity.upper()]
+        # Support both 'body' and 'message' fields
+        final_message = req.message if req.message else req.body
+        
+        if not final_message:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Either 'message' or 'body' field is required"
+            )
+        
+        try:
+            severity = BroadcastSeverity[req.severity.upper()]
+        except KeyError:
+            severity = BroadcastSeverity.INFO  # Default to INFO if invalid severity
         
         result = await broadcast_all(
             db=db,
             authority_id=current_user.id,
             title=req.title,
-            message=req.message,
+            message=final_message,
             severity=severity,
             alert_type=req.alert_type,
             action_required=req.action_required
@@ -1969,6 +2039,8 @@ async def broadcast_all_tourists(
         
         return result
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

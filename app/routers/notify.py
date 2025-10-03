@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 import logging
 
 from ..database import get_db
@@ -413,46 +413,76 @@ async def update_notification_settings(
 async def get_public_panic_alerts(
     limit: int = 50,
     hours_back: int = 24,
+    show_resolved: bool = False,
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Get list of active panic/SOS alerts (PUBLIC - No authentication required).
+    Get list of panic/SOS alerts (PUBLIC - No authentication required).
     
     This endpoint is public to allow emergency services, nearby tourists,
     and community members to be aware of active emergencies.
     
-    Personal information is anonymized for privacy.
+    Args:
+        limit: Maximum number of alerts to return (default: 50, max: 100)
+        hours_back: Time window in hours to look back for alerts (default: 24)
+        show_resolved: Include resolved alerts in the response (default: false)
+    
+    Returns:
+        List of panic alerts with location and resolution information
     """
     from ..models.database_models import AlertType, AlertSeverity, Location
+    
+    # Validate and cap limit
+    if limit > 100:
+        limit = 100
     
     # Calculate time threshold
     time_threshold = datetime.utcnow() - timedelta(hours=hours_back)
     
-    # Query panic and SOS alerts
-    query = select(Alert).where(
-        Alert.type.in_([AlertType.PANIC, AlertType.SOS]),
-        Alert.timestamp >= time_threshold
-    ).order_by(desc(Alert.timestamp)).limit(limit)
+    # Build optimized query with JOIN
+    query = (
+        select(Alert, Location)
+        .outerjoin(Location, Alert.location_id == Location.id)
+        .where(
+            Alert.type.in_([AlertType.PANIC, AlertType.SOS]),
+            Alert.created_at >= time_threshold
+        )
+    )
+    
+    # Filter by resolution status if show_resolved is False
+    if not show_resolved:
+        query = query.where(Alert.is_resolved == False)
+    
+    query = query.order_by(desc(Alert.created_at)).limit(limit)
     
     result = await db.execute(query)
-    alerts = result.scalars().all()
+    rows = result.all()
+    
+    # Count unresolved and resolved alerts separately
+    count_query = (
+        select(
+            func.count(Alert.id).filter(Alert.is_resolved == False).label('unresolved'),
+            func.count(Alert.id).filter(Alert.is_resolved == True).label('resolved')
+        )
+        .where(
+            Alert.type.in_([AlertType.PANIC, AlertType.SOS]),
+            Alert.created_at >= time_threshold
+        )
+    )
+    count_result = await db.execute(count_query)
+    counts = count_result.one()
     
     # Format alerts with anonymized data
     panic_list = []
-    for alert in alerts:
-        # Get location if available
+    for alert, location in rows:
+        # Get location data
         location_data = None
-        if alert.location_id:
-            loc_query = select(Location).where(Location.id == alert.location_id)
-            loc_result = await db.execute(loc_query)
-            location = loc_result.scalar_one_or_none()
-            
-            if location:
-                location_data = {
-                    "lat": location.latitude,
-                    "lon": location.longitude,
-                    "timestamp": location.timestamp.isoformat()
-                }
+        if location:
+            location_data = {
+                "lat": location.latitude,
+                "lon": location.longitude,
+                "timestamp": location.timestamp.isoformat() if location.timestamp else None
+            }
         
         # Get tourist's last known location if no specific location
         if not location_data and alert.tourist_id:
@@ -467,6 +497,11 @@ async def get_public_panic_alerts(
                     "timestamp": tourist.last_seen.isoformat() if tourist.last_seen else None
                 }
         
+        # Handle timezone-aware datetime
+        now_utc = datetime.now(timezone.utc)
+        alert_time = alert.created_at if alert.created_at.tzinfo else alert.created_at.replace(tzinfo=timezone.utc)
+        time_delta = now_utc - alert_time
+        
         panic_list.append({
             "alert_id": alert.id,
             "type": alert.type.value,
@@ -474,15 +509,21 @@ async def get_public_panic_alerts(
             "title": alert.title,
             "description": "Emergency situation - assistance needed",  # Generic description for privacy
             "location": location_data,
-            "timestamp": alert.timestamp.isoformat(),
-            "time_ago": str(datetime.utcnow() - alert.timestamp),
-            "status": "active" if (datetime.utcnow() - alert.timestamp).total_seconds() < 3600 else "older"
+            "created_at": alert.created_at.isoformat(),
+            "time_ago": str(time_delta),
+            "status": "active" if time_delta.total_seconds() < 3600 else "older",
+            "resolved": alert.is_resolved,
+            "resolved_at": alert.resolved_at.isoformat() if alert.resolved_at else None,
+            "resolved_by": alert.resolved_by
         })
     
     return {
         "total_alerts": len(panic_list),
+        "unresolved_count": counts.unresolved,
+        "resolved_count": counts.resolved,
         "active_count": len([a for a in panic_list if a['status'] == 'active']),
         "hours_back": hours_back,
+        "show_resolved": show_resolved,
         "alerts": panic_list,
         "timestamp": datetime.utcnow().isoformat(),
         "note": "Personal information anonymized for privacy. Contact emergency services for urgent situations."

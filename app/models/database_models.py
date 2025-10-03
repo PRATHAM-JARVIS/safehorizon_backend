@@ -151,6 +151,7 @@ class Alert(Base):
     acknowledged_by = Column(String, ForeignKey("authorities.id"), nullable=True)
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
     is_resolved = Column(Boolean, default=False)
+    resolved_by = Column(String, ForeignKey("authorities.id"), nullable=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
