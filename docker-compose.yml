@@ -10,26 +10,31 @@ services:
     depends_on:
       - db
       - redis
+    restart: unless-stopped
     volumes:
-      - ./:/app
+      - ./models_store:/app/models_store
 
   db:
     image: postgis/postgis:15-3.4
     container_name: safehorizon_db
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: safehorizon123
       POSTGRES_DB: safehorizon
     ports:
       - "5432:5432"
+    restart: unless-stopped
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./init-extensions.sql:/docker-entrypoint-initdb.d/init-extensions.sql
 
   redis:
     image: redis:7-alpine
     container_name: safehorizon_redis
     ports:
       - "6379:6379"
+    restart: unless-stopped
+    command: redis-server --appendonly yes
 
 volumes:
   pgdata:
